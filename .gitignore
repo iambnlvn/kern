@@ -1,0 +1,18 @@
+# Zig build artifacts
+zig-cache/
+.zig-cache/
+
+# Zig build output
+zig-out/
+
+# Zig test artifacts
+zig-test/
+
+# Zig documentation
+zig-doc/
+
+# Zig package manager
+.zigpkg/
+
+# Zig language server
+.zls/
