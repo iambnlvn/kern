@@ -49,4 +49,74 @@ const ELF = struct {
             AARCH64 = 0xb7,
         };
     };
+    const ProgramHeader = extern struct {
+        type: PHType,
+        flags: u32,
+        offset: u64,
+        vaddr: u64,
+        reserved: u64,
+        filesz: u64,
+        memsz: u64,
+        alignment: u64,
+
+        const PHType = enum(u32) {
+            unused = 0,
+            load, // loadable segment
+            dynamic, // dynamic linking information
+            interp,
+            note, // auxiliary information
+            shlib,
+            phdr,
+            tls, // thread local storage
+            gnu_eh_frame, // exception handling frame
+            gnu_stack, // stack segment
+            nu_relro, //read-only after relocation
+        };
+
+        const Flags = struct {
+            const executable: u32 = 1 << 0;
+            const writable: u32 = 1 << 1;
+            const readable: u32 = 1 << 2;
+        };
+    };
+
+    const SectionHeader = extern struct {
+        type: Type,
+        sectionNameOffset: u32,
+        flags: u64,
+        va: u64,
+        offset: u64,
+        size: u64,
+        link: u32,
+        info: u32,
+        alignment: u64,
+        entrySize: u64,
+
+        const Type = enum(u32) {
+            null = 0, // Marks an unused section header
+            progbits, // Contains information defined by the program
+            symtab, // Contains a linker symbol table
+            strtab, // Contains a string table
+            rela, // Contains "Rela" type relocation entries
+            hash, // Contains a symbol hash table
+            dynamic, // Contains dynamic linking tables
+            note, // Contains note information
+            nobits, // Contains uninitialized space; does not occupy any space in the file
+            rel, // Contains "Rel" type relocation entries
+            reserved, // Reserved
+            dynsym, // Contains a dynamic loader symbol table
+            init_array, // Contains an array of constructors
+            fini_array, // Contains an array of destructors
+            preinit_array, // Contains an array of pre-constructors
+            group, // Contains a section group
+            symtab_shndx, // Contains extended section indices
+            num, // Number of defined types
+        };
+
+        const Flags = struct {
+            const writable: u64 = 1 << 0;
+            const alloc: u64 = 1 << 1;
+            const execinstr: u64 = 1 << 2;
+        };
+    };
 };
