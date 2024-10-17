@@ -1,5 +1,5 @@
 const std = @import("std");
-
+const uefi = std.os.uefi;
 const ELF = struct {
     const Header = extern struct {
         magic: u32,
@@ -120,3 +120,46 @@ const ELF = struct {
         };
     };
 };
+
+const StdOut = struct {
+    const Self = @This();
+    protocol: *uefi.protocol.SimpleTextOutput,
+
+    fn write(self: *Self, msg: []const u8) void {
+        for (msg) |c| {
+            const u16Char = [2]u16{ c, 0 };
+            _ = self.protocol.outputString(&u16Char);
+        }
+    }
+};
+var stdOutFmtBuffer: [0x1000]u8 = undefined;
+var stdOut = StdOut{ .protocol = undefined };
+
+fn print(comptime fmt: []const u8, args: anytype) void {
+    const formattedStr = std.fmt.bufPrint(stdOutFmtBuffer[0..], fmt, args) catch unreachable;
+    StdOut.write(formattedStr);
+}
+
+fn panic(comptime fmt: []const u8, args: anytype) void {
+    print("\r\nPANIC:\r\n\r\n" ++ fmt, args);
+    haltCpu();
+}
+
+inline fn haltCpu() noreturn {
+    @setCold(true);
+    @setRuntimeSafety(false);
+    while (true) {
+        asm volatile (
+            \\.intel_syntax noprefix
+            \\cli
+            \\hlt
+        );
+    }
+    unreachable;
+}
+
+fn checkEfiStatus(status: uefi.Status, comptime errMessage: []const u8) void {
+    if (status != .Success) {
+        panic("EFI ERROR: {}. :" ++ errMessage, .{status});
+    }
+}
