@@ -163,3 +163,34 @@ fn checkEfiStatus(status: uefi.Status, comptime errMessage: []const u8) void {
         panic("EFI ERROR: {}. :" ++ errMessage, .{status});
     }
 }
+
+// Global Descriptor Table (GDT) structure
+const GDT = extern struct {
+    nullEntry: u64, // Null descriptor, not used. Required as the first entry.
+    codeEntry: u64, // Code segment descriptor for 32-bit code.
+    dataEntry: u64, // Data segment descriptor for 32-bit data.
+    codeEntry16: u64, // Code segment descriptor for 16-bit code.
+    dataEntry16: u64, // Data segment descriptor for 16-bit data.
+    userCodeEntry: u64, // User-mode code segment descriptor for 32-bit code.
+    userDataEntry: u64, // User-mode data segment descriptor for 32-bit data.
+    taskStateSegment1: u64, // First part of the Task State Segment (TSS) descriptor.
+    taskStateSegment2: u64, // Second part of the Task State Segment (TSS) descriptor.
+    codeEntry64: u64, // Code segment descriptor for 64-bit code.
+    dataEntry64: u64, // Data segment descriptor for 64-bit data.
+    userCodeEntry64: u64, // User-mode code segment descriptor for 64-bit code.
+    userCodeEntry64c: u64, // Another user-mode code segment descriptor for 64-bit cod
+    userDataEntry64: u64, // User-mode data segment descriptor for 64-bit data.
+
+    const Entry = packed struct {
+        // limitLow: u16,
+        // baseLow: u16,
+        // baseMid: u8,
+        // access: u8,
+        // granularity: u8,
+        // baseHigh: u8,
+        const Descriptor = packed struct {
+            limit: u16,
+            base: u64,
+        };
+    };
+};
