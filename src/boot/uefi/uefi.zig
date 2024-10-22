@@ -194,9 +194,9 @@ const GDT = extern struct {
         };
     };
 };
-var bootServices: *uefi.protocol.BootServices = undefined;
+var bootServices: *uefi.tables.BootServices = undefined;
 const pageSize = 0x1000;
-
+const uefiAsmAddress = 0x180000;
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
     bootServices = uefi.system_table.boot_services;
@@ -231,13 +231,34 @@ pub fn main() noreturn {
     const simpleFileSysProto = blk: {
         const simpleFsProtoGuid = uefi.protocol.SimpleFileSystem.guid;
         var ptr: ?*uefi.protocols.SimpleFileSystemProtocol = undefined;
-        checkEfiStatus(bootServices.openProtocol(loadedImgProto.device_handle.?, @as(*align(8) const uefi.Guid, @ptrCast(&simpleFsProtoGuid)), @as(*?*anyopaque, @ptrCast(&ptr), uefi.handle, null, .{ .get_protocol = true }), "Failed to open protocol"));
+        checkEfiStatus(bootServices.openProtocol(loadedImgProto.device_handle.?, @as(*align(8) const uefi.Guid, @ptrCast(&simpleFsProtoGuid)), @as(*?*anyopaque, @ptrCast(&ptr)), uefi.handle, null, .{ .get_protocol = true }), "Failed to open protocol");
         break :blk ptr.?;
     };
 
     const fsRoot = blk: {
-        var fileProto: *const uefi.protocols.FileProtocol = undefined;
+        var fileProto: *const uefi.protocol.File = undefined;
         checkEfiStatus(simpleFileSysProto.openVolume(&fileProto), "Failed to open ESP volume");
         break :blk fileProto;
     };
+
+    const kernelFile = blk: {
+        var file: *uefi.protocol.File = undefined;
+        checkEfiStatus(fsRoot.open(&file, std.unicode.utf8ToUtf16LeStringLiteral("Kernel.elf"), uefi.protocol.File.efi_file_mode_read, 0), "Failed to open kernel file");
+        break :blk file;
+    };
+    const maxKernelSize = pageCount * pageSize + (kernelAddress - baseAddress);
+    var kernelSize: usize = maxKernelSize;
+    checkEfiStatus(kernelFile.read(&kernelSize, @as([*]u8, kernelAddress)), "Failed to read kernel file");
+
+    if (kernelSize >= maxKernelSize) {
+        panic("Kernel file is too large\n Max size:{any} Kernel Size:{any}", .{ maxKernelSize, kernelSize });
+    }
+
+    const uefiAsmFile = blk: {
+        var file: *uefi.protocol.File = undefined;
+        checkEfiStatus(fsRoot.open(&file, std.unicode.utf8ToUtf16LeStringLiteral("uefi_asm.bin"), uefi.protocol.File.efi_file_mode_read, 0), "Failed to open UEFI ASM file");
+        break :blk file;
+    };
+    var size: usize = 0x80000;
+    checkEfiStatus(uefiAsmFile.read(&size, @as([*]u8, uefiAsmAddress)), "Failed to read UEFI ASM file");
 }
