@@ -194,3 +194,50 @@ const GDT = extern struct {
         };
     };
 };
+var bootServices: *uefi.protocol.BootServices = undefined;
+const pageSize = 0x1000;
+
+pub fn main() noreturn {
+    stdOut = .{ .protocol = uefi.system_table.con_out.? };
+    bootServices = uefi.system_table.boot_services;
+    _ = stdOut.protocol.clearScreen();
+
+    stdOut.write("Hello, UEFI!\r\n");
+
+    const baseAddress = 0x100000;
+    const kernelAddress = 0x200000;
+    const pageCount = 0x200;
+    var address = @as([*]align(pageSize) u8, @ptrFromInt(baseAddress));
+    checkEfiStatus(bootServices.allocatePages(.AllocateAddress, .LoaderData, pageCount, &address), "Unable to allocate pages");
+
+    const RSDPEntryVendorTable: *anyopaque = blk: {
+        const confEntries = uefi.system_table.configuration_table[0..uefi.system_table.number_of_table_entries];
+        for (confEntries) |entry| {
+            if (entry.vendor_guid == uefi.tables.ConfigurationTable.acpi_20_table_guid) {
+                break :blk entry.vendor_table;
+            }
+        }
+        panic("ACPI 2.0 table not found", .{});
+    };
+    _ = RSDPEntryVendorTable;
+
+    const loadedImgProto = blk: {
+        const loadedImgProtoGuid = uefi.protocol.LoadedImage.guid;
+        var ptr: ?*anyopaque = undefined;
+        checkEfiStatus(bootServices.openProtocol(uefi.handle, @as(*align(8) const uefi.Guid, @ptrCast(&loadedImgProtoGuid)), &ptr, uefi.handle, null, .{ .get_protocol = true }), "Failed to open protocol");
+        break :blk @as(*align(1) uefi.protocols.LoadedImageProtocol, @ptrCast(ptr.?));
+    };
+
+    const simpleFileSysProto = blk: {
+        const simpleFsProtoGuid = uefi.protocol.SimpleFileSystem.guid;
+        var ptr: ?*uefi.protocols.SimpleFileSystemProtocol = undefined;
+        checkEfiStatus(bootServices.openProtocol(loadedImgProto.device_handle.?, @as(*align(8) const uefi.Guid, @ptrCast(&simpleFsProtoGuid)), @as(*?*anyopaque, @ptrCast(&ptr), uefi.handle, null, .{ .get_protocol = true }), "Failed to open protocol"));
+        break :blk ptr.?;
+    };
+
+    const fsRoot = blk: {
+        var fileProto: *const uefi.protocols.FileProtocol = undefined;
+        checkEfiStatus(simpleFileSysProto.openVolume(&fileProto), "Failed to open ESP volume");
+        break :blk fileProto;
+    };
+}
