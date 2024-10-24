@@ -194,9 +194,25 @@ const GDT = extern struct {
         };
     };
 };
+const VideoInfo = extern struct {
+    frameBufferBase: *u8,
+    horizontalResolution: u32,
+    verticalResolution: u32,
+    pixelsPerScanLine: u32,
+    pixelFormat: u32,
+};
+
+const MemoryRegion = extern struct {
+    baseAddress: u64,
+    regionSize: u64,
+};
+var memRegions: [1024]MemoryRegion = undefined;
+
 var bootServices: *uefi.tables.BootServices = undefined;
 const pageSize = 0x1000;
 const uefiAsmAddress = 0x180000;
+const memMapBuffer: [0x4000]u8 = undefined;
+
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
     bootServices = uefi.system_table.boot_services;
@@ -261,4 +277,49 @@ pub fn main() noreturn {
     };
     var size: usize = 0x80000;
     checkEfiStatus(uefiAsmFile.read(&size, @as([*]u8, uefiAsmAddress)), "Failed to read UEFI ASM file");
+
+    const videoInfo = blk: {
+        var gop: *uefi.protocol.GraphicsOutput = undefined;
+        const gopGuid = uefi.protocol.GraphicsOutput.guid;
+        checkEfiStatus(bootServices.locateProtocol(@as(*align(8) const uefi.Guid, @ptrCast(&gopGuid)), null, @as(*?*anyopaque, &gop)), "Failed to locate GOP protocol");
+        break :blk VideoInfo{
+            .frameBufferBase = gop.mode.frame_buffer_base,
+            .horizontalResolution = gop.mode.info.horizontal_resolution,
+            .verticalResolution = gop.mode.info.vertical_resolution,
+            .pixelsPerScanLine = gop.mode.info.pixels_per_scan_line,
+            .pixelFormat = gop.mode.info.pixel_format,
+        };
+    };
+    var mapKey: usize = 0;
+    var memoryMapSize: usize = memMapBuffer.len;
+    var descriptorSize: usize = 0;
+    var descriptorVersion: u32 = 0;
+
+    checkEfiStatus(bootServices.getMemoryMap(&memoryMapSize, @as(
+        [*]uefi.tables.MemoryDescriptor,
+        @intFromPtr(&memMapBuffer),
+    ), &mapKey, &descriptorSize, &descriptorVersion), "Failed to get memory map");
+
+    if (memoryMapSize == 0 or descriptorSize == 0) {
+        panic("Invalid memory map size or descriptor size", .{});
+    }
+    var memRegionCount: u64 = 0;
+    const maxCount = memoryMapSize / descriptorSize;
+
+    var regionIter: u64 = 0;
+
+    while (regionIter < maxCount and memRegionCount != memRegions.len - 1) {
+        const descriptor = @as(*uefi.tables.MemoryDescriptor, @ptrFromInt(@intFromPtr(&memMapBuffer) + regionIter * descriptorSize));
+
+        if (descriptor.type == .ConventionalMemory and descriptor.physical_start >= 0x300000) {
+            memRegions[memRegionCount] = MemoryRegion{
+                .baseAddress = descriptor.physical_start,
+                .regionSize = descriptor.number_of_pages * pageSize,
+            };
+            memRegionCount += 1;
+        }
+        memRegions[memRegionCount].baseAddress = 0;
+        regionIter += 1;
+    }
+    checkEfiStatus(bootServices.exitBootServices(uefi.handle, mapKey), "Failed to exit boot services\n");
 }
