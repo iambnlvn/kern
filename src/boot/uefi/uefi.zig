@@ -158,6 +158,25 @@ inline fn haltCpu() noreturn {
     unreachable;
 }
 
+fn isInRange(ph: *ELF.ProgramHeader) bool {
+    const va = ph.virtual_address;
+    const size = ph.size_in_memory;
+    return va <= faultAddr and va + size >= faultAddr;
+}
+
+fn calculateIndex(vA: u64, level: u64, _pageBitCount: u64, _entryPerPageTableBitCount: u64) u64 {
+    return (vA >> (_pageBitCount + entryPerPageTableBitCount * level)) & (_entryPerPageTableBitCount - 1);
+}
+
+fn initializeTable(table: [*]u64, idx: usize, nextPageTable: *u64, _pageSize: usize) *u64 {
+    if (table[idx] & 1 == 0) {
+        table[idx] = nextPageTable | 0xb111;
+        @memset(@as([*]u8, nextPageTable[0.._pageSize]), 0);
+        nextPageTable += pageSize;
+    }
+    return @as([*]u64, table[idx] & ~@as(u64, _pageSize - 1));
+}
+
 fn checkEfiStatus(status: uefi.Status, comptime errMessage: []const u8) void {
     if (status != .Success) {
         panic("EFI ERROR: {}. :" ++ errMessage, .{status});
@@ -201,6 +220,15 @@ const VideoInfo = extern struct {
     pixelsPerScanLine: u32,
     pixelFormat: u32,
 };
+const VideoModeInfo = extern struct {
+    width: u16,
+    height: u16,
+    bytesPerScanLine: u16,
+    bitesPerPixel: u8,
+    pyhsicalBufferAddress: u64,
+    validEdid: u8,
+    ediData: [128]u8,
+};
 
 const MemoryRegion = extern struct {
     baseAddress: u64,
@@ -212,7 +240,9 @@ var bootServices: *uefi.tables.BootServices = undefined;
 const pageSize = 0x1000;
 const uefiAsmAddress = 0x180000;
 const memMapBuffer: [0x4000]u8 = undefined;
-
+const pageBitCount = 12;
+const faultAddr = 0xffffffff800d9000;
+const entryPerPageTableBitCount = 9;
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
     bootServices = uefi.system_table.boot_services;
@@ -322,4 +352,102 @@ pub fn main() noreturn {
         regionIter += 1;
     }
     checkEfiStatus(bootServices.exitBootServices(uefi.handle, mapKey), "Failed to exit boot services\n");
+    var paging = @as([*]u8, @ptrFromInt(0x140000));
+    @memset(@as([*]u8, @ptrCast(paging)), 0x5000);
+    paging[0x1FE] = 0x140003;
+    paging[0x000] = 0x141003;
+    paging[0x200] = 0x142003;
+    paging[0x400] = 0x143003;
+    paging[0x401] = 0x144003;
+    for (paging[0x600 .. 0x600 + 0x400], 0..) |*ptr, idx| {
+        ptr.* = (idx * pageSize) | 0x3;
+    }
+
+    var dest = @as([*]u8, @ptrFromInt(0x107ff0))[0..16];
+    @memset(dest, 0);
+
+    var video = @as(*VideoModeInfo, @ptrFromInt(0x107000));
+    video.width = @as(u16, videoInfo.horizontalResolution);
+    video.height = @as(u16, videoInfo.verticalResolution);
+    video.bytesPerScanLine = @as(u16, videoInfo.pixelsPerScanLine * @sizeOf(u32));
+    video.bitesPerPixel = 32;
+    video.pyhsicalBufferAddress = @as(u64, videoInfo.frameBufferBase);
+    video.validEdid = (0 << 1) | (1 << 0);
+
+    var nextPageTable: u64 = 0x1c0000;
+    const elfHeader = @as(*ELF.Header, @ptrFromInt(kernelAddress));
+
+    const programHeaders = @as([*]ELF.ProgramHeader, @ptrFromInt(kernelAddress + elfHeader.programHeaderTableOffset))[0..elfHeader.programHeaderCount];
+
+    var bool = false;
+
+    for (programHeaders) |*progHeader| {
+        if (progHeader.type == .load) continue;
+        if (progHeader.vaddr & 0xfff != 0) panic("Invalid vaddr alignment", .{});
+
+        const page2AllocCount = (progHeader.memsz >> pageBitCount) + @intFromBool(progHeader.memsz & 0xfff != 0) + @intFromBool(progHeader.vaddr & 0xfff != 0);
+
+        var physicalAddr = blk: {
+            for (memRegions) |*region| {
+                if (region.baseAddress == 0) break;
+                if (region.regionSize >= page2AllocCount) {
+                    const res = region.baseAddress;
+                    region.regionSize -= page2AllocCount;
+                    region.baseAddress += page2AllocCount << 12;
+                    break :blk res & 0xFFFFFFFFFFFFF000;
+                }
+            }
+            @ptrFromInt(videoInfo.frameBufferBase + @sizeOf(u32)).* = 0x00000000;
+            panic("Failed to allocate memory", .{});
+        };
+
+        var pageIdx: u64 = 0;
+        while (pageIdx < page2AllocCount) : ({
+            pageIdx += 1;
+            physicalAddr += pageSize;
+        }) {
+            const base = (progHeader.vaddr + (pageIdx * pageSize));
+            if (isInRange(progHeader)) {
+                if (base >= faultAddr and base - faultAddr < 0x1000) {
+                    bool = true;
+                }
+            }
+
+            const vA = base & 0x0000FFFFFFFFF000;
+            const l4Idx: u64 = calculateIndex(vA, 3, pageBitCount, entryPerPageTableBitCount);
+            const l3Idx: u64 = calculateIndex(vA, 2, pageBitCount, entryPerPageTableBitCount);
+            const l2Idx: u64 = calculateIndex(vA, 1, pageBitCount, entryPerPageTableBitCount);
+            const l1Idx: u64 = calculateIndex(vA, 0, pageBitCount, entryPerPageTableBitCount);
+
+            //TOdo?: which one should I keep
+            // var l4Table = @as([*]u64, @ptrFromInt(0x140000));
+
+            // if (l4Table[l4Idx] & 1 == 0) {
+            //     l4Table[l4Idx] = nextPageTable | 0xb111;
+            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
+            //     nextPageTable += pageSize;
+            // }
+
+            // var l3Table = @as([*]u64, l4Table[l4Idx] & ~@as(u64, pageSize - 1));
+            // if (l3Table[l3Idx] & 1 == 0) {
+            //     l4Table[l3Idx] = nextPageTable | 0xb111;
+            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
+            //     nextPageTable += pageSize;
+            // }
+
+            // var l2Table = @as([*]u64, l3Table[l3Idx] & ~@as(u64, pageSize - 1));
+            // if (l2Table[l2Idx] & 1 == 0) {
+            //     l2Table[l2Idx] = nextPageTable | 0xb111;
+            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
+            //     nextPageTable += pageSize;
+            // }
+            // var l1Table = @as([*]u64, l2Table[l2Idx] & ~@as(u64, pageSize - 1));
+            // l1Table[l1Idx] = physicalAddr | 0xb111;
+            var l4Table = @as([*]u64, @ptrFromInt(0x140000));
+            var l3Table = initializeTable(l4Table, l4Idx, nextPageTable, pageSize);
+            var l2Table = initializeTable(l3Table, l3Idx, nextPageTable, pageSize);
+            var l1Table = initializeTable(l2Table, l2Idx, nextPageTable, pageSize);
+            l1Table[l1Idx] = physicalAddr | 0xb111;
+        }
+    }
 }
