@@ -243,6 +243,8 @@ const memMapBuffer: [0x4000]u8 = undefined;
 const pageBitCount = 12;
 const faultAddr = 0xffffffff800d9000;
 const entryPerPageTableBitCount = 9;
+var kernelPages: [0x10000]u64 = undefined;
+var kernelPageCount: u64 = 0;
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
     bootServices = uefi.system_table.boot_services;
@@ -450,4 +452,48 @@ pub fn main() noreturn {
             l1Table[l1Idx] = physicalAddr | 0xb111;
         }
     }
+    const elfHeader = @as(*ELF.Header, @ptrFromInt(kernelAddress));
+    const entryPoint = elfHeader.entryPointVA;
+    const progHeaders = @as([*]ELF.ProgramHeader, @ptrFromInt(kernelAddress + elfHeader.programHeaderTableOffset))[0..elfHeader.programHeaderCount];
+
+    for (progHeaders) |*progHeader| {
+        if (progHeader.type != ELF.ProgramHeader.PHType.load) continue;
+        var page2allocCount = (progHeader.memsz >> pageBitCount) + @intFromBool(progHeader.memsz & 0xfff != 0) + @intFromBool(progHeader.vaddr & 0xfff != 0);
+        var baseVA = progHeader.vaddr & 0xFFFFFFFFFFFFF000;
+
+        for (kernelpages[0..kernelPageCount]) |kp| {
+            //TODO?: is this correct?
+            // if (kp >= baseVA and kp < baseVA + page2allocCount * pageSize) {
+            //     kp = 0;
+            // }
+            if (kp >= baseVA) {
+                baseVA += pageSize;
+                page2allocCount -= 1;
+            }
+        }
+        var vaIter: u64 = baseVA;
+        const topAddr = baseVA + page2allocCount * pageSize;
+
+        while (vaIter < topAddr) : (vaIter += pageSize) {
+            kernelPages[kernelPageCount] = vaIter;
+            kernelPageCount += 1;
+        }
+    }
+
+    const basePAddr = blk: {
+        for (memRegions) |*region| {
+            if (region.baseAddress == 0) break;
+            if (region.regionSize >= kernelPageCount) {
+                const res = region.baseAddress;
+                region.regionSize -= kernelPageCount;
+                region.baseAddress += kernelPageCount << 12;
+                break :blk res & 0xFFFFFFFFFFFFF000;
+            }
+        }
+        panic("Failed to allocate memory", .{});
+    };
+    var newMemRegion = @as([*]MemoryRegion, @ptrFromInt(0x160000));
+    @memcpy(newMemRegion[0..memRegions.len], memRegions[0..memRegions.len]);
+
+    // work on The Global Descriptor Table (GDT)
 }
