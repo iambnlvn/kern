@@ -201,16 +201,25 @@ const GDT = extern struct {
     userDataEntry64: u64, // User-mode data segment descriptor for 64-bit data.
 
     const Entry = packed struct {
-        // limitLow: u16,
-        // baseLow: u16,
-        // baseMid: u8,
-        // access: u8,
-        // granularity: u8,
-        // baseHigh: u8,
-        const Descriptor = packed struct {
-            limit: u16,
-            base: u64,
-        };
+        baseLow: u32,
+        baseMid: u8,
+        limit: u16,
+        access: u8,
+
+        fn new(baseLow: u32, baseMiddle: u8, limit: u16, access: u8) u64 {
+            const entry = Entry{
+                .baseLow = baseLow,
+                .baseMid = baseMiddle,
+                .limit = limit,
+                .access = access,
+            };
+            //TODO!: this is prolly not correct, not sure!!
+            return @as(*align(1) const u64, @ptrCast(&entry));
+        }
+    };
+    const Descriptor = packed struct {
+        limit: u16,
+        base: u64,
     };
 };
 const VideoInfo = extern struct {
@@ -245,6 +254,7 @@ const faultAddr = 0xffffffff800d9000;
 const entryPerPageTableBitCount = 9;
 var kernelPages: [0x10000]u64 = undefined;
 var kernelPageCount: u64 = 0;
+
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
     bootServices = uefi.system_table.boot_services;
@@ -365,7 +375,7 @@ pub fn main() noreturn {
         ptr.* = (idx * pageSize) | 0x3;
     }
 
-    var dest = @as([*]u8, @ptrFromInt(0x107ff0))[0..16];
+    const dest = @as([*]u8, @ptrFromInt(0x107ff0))[0..16];
     @memset(dest, 0);
 
     var video = @as(*VideoModeInfo, @ptrFromInt(0x107000));
@@ -376,12 +386,12 @@ pub fn main() noreturn {
     video.pyhsicalBufferAddress = @as(u64, videoInfo.frameBufferBase);
     video.validEdid = (0 << 1) | (1 << 0);
 
-    var nextPageTable: u64 = 0x1c0000;
+    const nextPageTable: u64 = 0x1c0000;
     const elfHeader = @as(*ELF.Header, @ptrFromInt(kernelAddress));
 
     const programHeaders = @as([*]ELF.ProgramHeader, @ptrFromInt(kernelAddress + elfHeader.programHeaderTableOffset))[0..elfHeader.programHeaderCount];
 
-    var bool = false;
+    var boolean = false;
 
     for (programHeaders) |*progHeader| {
         if (progHeader.type == .load) continue;
@@ -399,7 +409,8 @@ pub fn main() noreturn {
                     break :blk res & 0xFFFFFFFFFFFFF000;
                 }
             }
-            @ptrFromInt(videoInfo.frameBufferBase + @sizeOf(u32)).* = 0x00000000;
+            const ptr = @as(*u32, @ptrFromInt(videoInfo.frameBufferBase + @sizeOf(u32)));
+            ptr.* = 0x00000000;
             panic("Failed to allocate memory", .{});
         };
 
@@ -411,7 +422,7 @@ pub fn main() noreturn {
             const base = (progHeader.vaddr + (pageIdx * pageSize));
             if (isInRange(progHeader)) {
                 if (base >= faultAddr and base - faultAddr < 0x1000) {
-                    bool = true;
+                    boolean = true;
                 }
             }
 
@@ -445,15 +456,14 @@ pub fn main() noreturn {
             // }
             // var l1Table = @as([*]u64, l2Table[l2Idx] & ~@as(u64, pageSize - 1));
             // l1Table[l1Idx] = physicalAddr | 0xb111;
-            var l4Table = @as([*]u64, @ptrFromInt(0x140000));
-            var l3Table = initializeTable(l4Table, l4Idx, nextPageTable, pageSize);
-            var l2Table = initializeTable(l3Table, l3Idx, nextPageTable, pageSize);
-            var l1Table = initializeTable(l2Table, l2Idx, nextPageTable, pageSize);
+            const l4Table = @as([*]u64, @ptrFromInt(0x140000));
+            const l3Table = initializeTable(l4Table, l4Idx, nextPageTable, pageSize);
+            const l2Table = initializeTable(l3Table, l3Idx, nextPageTable, pageSize);
+            const l1Table = initializeTable(l2Table, l2Idx, nextPageTable, pageSize);
             l1Table[l1Idx] = physicalAddr | 0xb111;
         }
     }
-    const elfHeader = @as(*ELF.Header, @ptrFromInt(kernelAddress));
-    const entryPoint = elfHeader.entryPointVA;
+
     const progHeaders = @as([*]ELF.ProgramHeader, @ptrFromInt(kernelAddress + elfHeader.programHeaderTableOffset))[0..elfHeader.programHeaderCount];
 
     for (progHeaders) |*progHeader| {
@@ -461,7 +471,7 @@ pub fn main() noreturn {
         var page2allocCount = (progHeader.memsz >> pageBitCount) + @intFromBool(progHeader.memsz & 0xfff != 0) + @intFromBool(progHeader.vaddr & 0xfff != 0);
         var baseVA = progHeader.vaddr & 0xFFFFFFFFFFFFF000;
 
-        for (kernelpages[0..kernelPageCount]) |kp| {
+        for (kernelPages[0..kernelPageCount]) |kp| {
             //TODO?: is this correct?
             // if (kp >= baseVA and kp < baseVA + page2allocCount * pageSize) {
             //     kp = 0;
@@ -480,20 +490,63 @@ pub fn main() noreturn {
         }
     }
 
-    const basePAddr = blk: {
-        for (memRegions) |*region| {
-            if (region.baseAddress == 0) break;
-            if (region.regionSize >= kernelPageCount) {
-                const res = region.baseAddress;
-                region.regionSize -= kernelPageCount;
-                region.baseAddress += kernelPageCount << 12;
-                break :blk res & 0xFFFFFFFFFFFFF000;
-            }
-        }
-        panic("Failed to allocate memory", .{});
-    };
+    // const basePAddr = blk: {
+    //     for (memRegions) |*region| {
+    //         if (region.baseAddress == 0) break;
+    //         if (region.regionSize >= kernelPageCount) {
+    //             const res = region.baseAddress;
+    //             region.regionSize -= kernelPageCount;
+    //             region.baseAddress += kernelPageCount << 12;
+    //             break :blk res & 0xFFFFFFFFFFFFF000;
+    //         }
+    //     }
+    //     panic("Failed to allocate memory", .{});
+    // };
     var newMemRegion = @as([*]MemoryRegion, @ptrFromInt(0x160000));
     @memcpy(newMemRegion[0..memRegions.len], memRegions[0..memRegions.len]);
 
     // work on The Global Descriptor Table (GDT)
+
+    const gdtBase = @as([*]u64, @ptrFromInt(0x180000));
+    const gdtDescriptorBaseAddr = gdtBase + @sizeOf(GDT);
+
+    var gdt = @as(GDT, @ptrFromInt(gdtBase));
+    gdt.nullEntry = 0;
+    gdt.codeEntry = gdt.codeEntry.new(0xffff, 0, 0xcf9a, 0);
+    gdt.dataEntry = gdt.dataEntry.new(0xffff, 0, 0xcf92, 0);
+    gdt.codeEntry16 = gdt.codeEntry16.new(0xffff, 0, 0x0f9a, 0);
+    gdt.dataEntry16 = gdt.dataEntry16.new(0xffff, 0, 0xcf92, 0);
+    gdt.userCodeEntry = gdt.userCodeEntry.new(0xffff, 0, 0xcf9a, 0);
+    gdt.userDataEntry = gdt.userDataEntry.new(0xffff, 0, 0xcf92, 0);
+    gdt.taskStateSegment1 = gdt.taskStateSegment1.new(0x67, 0, 0x89, 0);
+    gdt.taskStateSegment2 = gdt.taskStateSegment2.new(0x67, 0, 0x89, 0);
+    gdt.codeEntry64 = gdt.codeEntry64.new(0xffff, 0, 0xaf9a, 0);
+    gdt.dataEntry64 = gdt.dataEntry64.new(0xffff, 0, 0xaf92, 0);
+    gdt.userCodeEntry64 = gdt.userCodeEntry64.new(0xffff, 0, 0xaf9a, 0);
+    gdt.userCodeEntry64c = gdt.userCodeEntry64c.new(0xffff, 0, 0xafaa, 0);
+    gdt.userDataEntry64 = gdt.userDataEntry64.new(0xffff, 0, 0xaff2, 0);
+
+    var gdtDescriptor = @as(GDT.Descriptor, @ptrFromInt(gdtDescriptorBaseAddr));
+    gdtDescriptor.limit = @sizeOf(GDT) - 1;
+    gdtDescriptor.base = @as(u64, gdtBase);
+
+    asm volatile ("lgdt %[p]"
+        :
+        : [p] "*p" (@as(*GDT.Descriptor, @ptrFromInt(gdtDescriptorBaseAddr))),
+    );
+
+    asm volatile (
+        \\.intel_syntax noprefix
+        \\mov rax,0x140000
+        \\mov cr3,rax
+        \\mov rax,0x200000
+        \\mov rsp,rax
+        \\mov rax,0x50
+        \\mov ds,rax
+        \\mov es,rax
+        \\mov ss,rax
+    );
+
+    const entryPointFn = @as(fn () callconv(.C) noreturn, @ptrCast(uefiAsmAddress));
+    entryPointFn();
 }
