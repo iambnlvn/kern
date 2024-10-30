@@ -128,7 +128,7 @@ const StdOut = struct {
     fn write(self: *Self, msg: []const u8) void {
         for (msg) |c| {
             const u16Char = [2]u16{ c, 0 };
-            _ = self.protocol.outputString(&u16Char);
+            _ = self.protocol.outputString(@as(*const [1:0]u16, @ptrCast(&u16Char)));
         }
     }
 };
@@ -137,7 +137,7 @@ var stdOut = StdOut{ .protocol = undefined };
 
 fn print(comptime fmt: []const u8, args: anytype) void {
     const formattedStr = std.fmt.bufPrint(stdOutFmtBuffer[0..], fmt, args) catch unreachable;
-    StdOut.write(formattedStr);
+    StdOut.write(&formattedStr);
 }
 
 fn panic(comptime fmt: []const u8, args: anytype) void {
@@ -257,7 +257,7 @@ var kernelPageCount: u64 = 0;
 
 pub fn main() noreturn {
     stdOut = .{ .protocol = uefi.system_table.con_out.? };
-    bootServices = uefi.system_table.boot_services;
+    bootServices = uefi.system_table.boot_services.?;
     _ = stdOut.protocol.clearScreen();
 
     stdOut.write("Hello, UEFI!\r\n");
@@ -270,8 +270,8 @@ pub fn main() noreturn {
 
     const RSDPEntryVendorTable: *anyopaque = blk: {
         const confEntries = uefi.system_table.configuration_table[0..uefi.system_table.number_of_table_entries];
-        for (confEntries) |entry| {
-            if (entry.vendor_guid == uefi.tables.ConfigurationTable.acpi_20_table_guid) {
+        for (confEntries) |*entry| {
+            if (entry.vendor_guid.eql(uefi.tables.ConfigurationTable.acpi_20_table_guid)) {
                 break :blk entry.vendor_table;
             }
         }
