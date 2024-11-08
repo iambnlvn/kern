@@ -308,6 +308,133 @@ error32:
     mov ss, ax
     jmp error
 
+loadKernIntoMem:
+    mov eax, dword [kernelSize]
+    xor edx, edx
+    mov ecx, 0x200
+    div ecx
+    cmp eax, 0xffff
+    mov si, kernelSectorCountExceeded
+    jg error
+    mov cx, ax
+    mov edi, [kernBuffer]
+
+    mov eax, kernelSector
+    call loadSectors
+    jmp enableVideoMode
+
+loadSectors:
+    .loop:
+    pushad
+    push edi
+    mov bx, [partitionEntry]
+    mov ebx, [bx + 8]
+    add eax, ebx
+    mov [readStructure.lba], eax
+    mov ah, 0x42
+    mov dl, [driveNumber]
+    mov si, readStructure
+    call loadSector
+
+    mov si, errorReadingDisk
+    jc error
+    pop edi
+    call moveSectorToTarget
+    popad
+    add edi, 0x200
+    inc eax
+    loop .loop
+    ret
+
+loadSector:
+    mov di, [readStructure.lba]
+    xor ax, ax
+    mov es, ax
+    mov bx, 0x9000
+
+    mov ax, di
+    xor dx, dx
+    div word [sectorCount]
+    xor dx, dx
+    div word [headCount]
+    push dx
+    mov ch, al
+    shl ah, 6
+    mov cl, ah
+
+    mov ax, di
+    xor dx, dx
+    div word [sectorCount]
+    inc dx
+    or cl, dl
+
+    pop dx
+    mov dh, dl
+    mov dl, [driveNumber]
+    mov ax, 0x0201
+    int 0x13
+
+    ret
+
+
+
+readStructure:
+    dw 0x10
+    dw 1
+    dd temporaryLoadBuffer
+    .lba: dq 0
+
+
+moveSectorToTarget:
+    push ss
+    push ds
+    push es
+
+    cli
+    mov eax, cr0
+    or eax, 0x80000001
+    mov cr0, eax
+    jmp 0x8:.protectedMode
+
+    [bits 32]
+    .protectedMode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+    mov ecx, 0x200
+    mov esi, temporaryLoadBuffer
+    rep movsb
+
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
+    jmp 0x18:.realMode
+
+    [bits 16]
+    .real_mode:
+    mov eax, cr0
+    and eax, 0x7FFFFFFE
+    mov cr0, eax
+    jmp 0x0:.finish
+
+    .finish:
+    pop es
+    pop ds
+    pop ss
+    sti
+    ret
+
+
+enableVideoMode:
+    call vbe_init
+    jmp enableVideoModeDone ; TODO!add this marker later below
+
+
+;TODO: add VBE initialization code here
+
+
 driveNumber db 0
 partitionEntry dw 0
 sectorCount dw 0
@@ -322,3 +449,5 @@ noMsrError: db "Error: could not find MSR", 0
 errorEnableA20: db "Error: could not enable A20 line", 0
 memoryMapGettingError: db "Error: could not get memory map", 0
 noMemory: db "Error: could not find memory for kernel", 0
+kernelSectorCountExceeded: db "Error: kernel sector count exceeded", 0
+errorReadingDisk: db "Error: could not read disk", 0
