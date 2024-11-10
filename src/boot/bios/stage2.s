@@ -432,8 +432,108 @@ enableVideoMode:
     jmp enableVideoModeDone ; TODO!add this marker later below
 
 
-;TODO: add VBE initialization code here
 
+vbeInit:
+	mov ax, vesaInfo
+    shr ax, 4
+	mov	es, ax
+    xor	di,di
+    mov	ax,0x4F15
+	mov	bl,1
+	xor	cx,cx
+	xor	dx,dx
+	xor	di,di
+	int	0x10
+	cmp	ax,0x4F
+	jne	.noEdid
+	cmp	byte [es:1],0xFF
+	jne	.noEdid
+	mov	al,[es:0x38]
+	mov	ah,[es:0x3A]
+	shr	ah,4
+	mov	bl,[es:0x3B]
+	mov	bh,[es:0x3D]
+	shr	bh,4
+	or	ax,ax
+	jz	.noEdid
+	or	bx,bx
+	jz	.noEdid
+	mov	[wbeSuitableWidth],ax
+	mov	[vbeSuitableHeight],bx
+	mov	byte [vbeHasEdid],1
+	jmp	.noFlatPanel
+
+    .noEdid:
+    mov	ax,0x4F11
+	mov	bx,1
+	xor	di,di
+	int	0x10
+	cmp	ax,0x4F
+	jne	.noFlatPanel
+	mov	ax,[es:0x00]
+	mov	bx,[es:0x02]
+	or	ax,ax
+	jz	.noFlatPanel
+	or	bx,bx
+	jz	.noFlatPanel
+	cmp	ax,4096
+	ja	.noFlatPanel
+	cmp	bx,4096
+	ja	.noFlatPanel
+	mov	[vbeSuitableWidth],ax
+	mov	[vbeSuitableHeight],bx
+
+    .noFlatPanel:
+    xor	di,di
+	mov	ax,0x4F00
+	int	0x10
+	cmp	ax,0x4F
+	jne badVbe
+
+	add	di,0x200
+	mov	eax,[es:14]
+	cmp	eax,0
+	je	.findDone
+	mov	ax,[es:16]
+	mov	fs,ax
+	mov	si,[es:14]
+	xor	cx,cx
+    .findLoop:
+    mov	ax,[fs:si]
+	cmp	ax,0xFFFF
+	je	.findDone
+	mov	[es:di],ax
+	add	di,2
+	add	si,2
+	jmp	.findLoop
+
+    .findDone:
+    mov	word [es:di],0xFFFF
+	cmp	di,0x200
+	jne	.addedModes
+	mov	word [es:di + 0],257
+	mov	word [es:di + 2],259
+	mov	word [es:di + 4],261
+	mov	word [es:di + 6],263
+	mov	word [es:di + 8],273
+	mov	word [es:di + 10],276
+	mov	word [es:di + 12],279
+	mov	word [es:di + 14],282
+	mov	word [es:di + 16],274
+	mov	word [es:di + 18],277
+	mov	word [es:di + 20],280
+	mov	word [es:di + 22],283
+	mov	word [es:di + 24],0xFFFF
+    .addedModes:
+    mov	si,0x200
+	mov	di,0x200
+
+badVbe:
+	mov	byte [es:di],0
+	ret
+
+;TODO! implement this later
+;vbeFailed:
 
 driveNumber db 0
 partitionEntry dw 0
@@ -451,3 +551,9 @@ memoryMapGettingError: db "Error: could not get memory map", 0
 noMemory: db "Error: could not find memory for kernel", 0
 kernelSectorCountExceeded: db "Error: kernel sector count exceeded", 0
 errorReadingDisk: db "Error: could not read disk", 0
+
+
+wbeSuitableWidth: dw 0
+vbeSuitableHeight: dw 0
+vbeSuitabeMode: dw 0
+vbeHasEdid: db 0
