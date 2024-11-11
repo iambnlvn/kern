@@ -528,6 +528,89 @@ vbeInit:
     mov	si,0x200
 	mov	di,0x200
 
+
+    .checkLoop:
+	mov	cx,[es:si]
+	mov	[es:di],cx
+	cmp	cx,0xFFFF
+	je	.checkDone
+	push	di
+	push	si
+	mov	ax,0x4F01
+	xor	di,di
+	or	cx, 0x4000
+	int	0x10
+	pop	si
+	pop	di
+	add	si,2
+	cmp	ax,0x4F			; Interrupt failure
+	jne	.checkLoop
+	cmp	byte [es:0x19],24	; 24 and 32 bit support only
+	je	.validBpp
+	cmp	byte [es:0x19],32
+	je	.validBpp
+	jne	.checkLoop
+
+    .validBpp:
+    cmp	word [es:0x14],480    ; 640x480 minimum resolution
+	jl	.checkLoop
+	mov	ax,[vbeSuitableWidth]
+	cmp	[es:0x12],ax
+	jne	.modeNotSuitable
+	mov	ax,[vbeSuitableHeight]
+	cmp	[es:0x14],ax
+	jne	.modeNotSuitable
+	mov	ax,[es:di]
+	mov	[vbeSuitabeMode],ax
+
+    .modeNotSuitable:
+    add	di,2
+	jmp	.checkLoop
+
+    .checkDone:
+    mov	bx,[vbeSuitabeMode]
+	or	bx,bx
+	jnz	.setGraphicsMode
+
+    .setGraphicsMode:
+    or	bx, 0x4000
+	mov	cx,bx
+	mov	ax,0x4F02
+	int	0x10
+	cmp	ax,0x4F
+	jne	vbeFailed
+
+	; save mode info for the kernel
+	mov	ax,0x4F01
+	xor	di,di
+	int	0x10
+	mov	byte [es:0],1 
+	mov	al,[es:0x19]
+	mov	[es:1],al     
+	mov	ax,[es:0x12]
+	mov	[es:2],ax     
+	mov	ax,[es:0x14]
+	mov	[es:4],ax     
+	mov	ax,[es:0x10]
+	mov	[es:6],ax    
+	mov	eax,[es:40]
+	mov	[es:8],eax    
+	xor	eax,eax
+	mov	[es:12],eax
+	mov	ax,0x4F15
+	mov	bl,1
+	xor	cx,cx
+	xor	dx,dx
+	mov	di,0x10
+	int	0x10
+	mov	al,[vbeHasEdid]
+	shl	al,1
+	or	[es:0],al
+	ret
+
+;Todo: handle the case of no suitable vbe
+
+
 badVbe:
 	mov	byte [es:di],0
 	ret
