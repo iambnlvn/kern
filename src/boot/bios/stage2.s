@@ -609,14 +609,124 @@ vbeInit:
 	ret
 
 ;Todo: handle the case of no suitable vbe
+    .noSuitableVbe:
+    mov	si,vbeSelectModePrompt
+	call	vbePrintStr
+	mov	bx,0x200
+	mov	cx,1
+
+    .printLoop:
+    mov	dx,[es:bx]
+	cmp	dx,0xFFFF
+	je	.printDone
+	cmp	cx,21
+	je	.printDone
+	xor	di,di
+	push	cx
+	mov	ax,0x4F01
+	mov	cx,dx
+	or	cx, 0x4000
+	int	0x10
+	pop	cx
+	mov	si,vbeLBracket
+	call	vbePrintStr
+	mov	ax,cx
+	call	vbePrintDecimal
+	mov	si,vbeRBracket
+	call	vbePrintStr
+	mov	ax,[es:0x12]
+	call	vbePrintDecimal
+	mov	si,vbeS
+	call	vbePrintStr
+	mov	ax,[es:0x14]
+	call	vbePrintDecimal
+	mov	si,vbeS
+	call	vbePrintStr
+	xor	ah,ah
+	mov	al,[es:0x19]
+	call	vbePrintDecimal
+	mov	si,vbeBpp
+	call	vbpePrintStr
+	call	vbePrintNewline
+	inc	cx
+	add	bx,2
+	jmp	.printLoop
 
 
+    .printDone:
+	mov	dx,cx
+	dec	dx
+	xor	cx,cx
+
+    .selectLoop:
+    cmp	cx,dx
+	jb	.c1
+	mov	cx,0
+    
 badVbe:
 	mov	byte [es:di],0
 	ret
 
 ;TODO! implement this later
 ;vbeFailed:
+
+
+
+
+vbePrintStr:
+    pusha
+	.loop:
+	lodsb
+	or	al,al
+	jz	.done
+	mov	ah,0xE
+	int	0x10
+	jmp	.loop
+	.done:
+	popa
+	ret
+
+vbePrintDecimal:
+	pusha
+	mov	bx,.buffer
+	mov	cx,10
+	.next:
+	xor	dx,dx
+	div	cx
+	add	dx,'0'
+	mov	[bx],dl
+	inc	bx
+	cmp	ax,0
+	jne	.next
+	.loop:
+	dec	bx
+	mov	al,[bx]
+	mov	ah,0xE
+	int	0x10
+	cmp	bx,.buffer
+	jne	.loop
+	popa
+	ret
+	.buffer: db 0, 0, 0, 0, 0
+
+vbePrintNewline:
+	pusha
+	mov	ah,0xE
+	mov	al,13
+	int	0x10
+	mov	ah,0xE
+	mov	al,10
+	int	0x10
+	popa
+	ret
+
+vbePrintSpace:
+	pusha
+	mov	ah,0xE
+	mov	al,' '
+	int	0x10
+	popa
+	ret
 
 driveNumber db 0
 partitionEntry dw 0
@@ -640,3 +750,11 @@ wbeSuitableWidth: dw 0
 vbeSuitableHeight: dw 0
 vbeSuitabeMode: dw 0
 vbeHasEdid: db 0
+
+vbeSelectModePrompt: db 'Select a video mode: [use up/down then press enter]',13,10,0
+vbeLBracket: db '(',0
+vbeRBracket: db ') ',0
+vbeS: db 'x',0
+vbeSpace: db ' ',0
+vbeBpp: db 'bpp',0
+vbeFailed: db 'This graphics mode could not be selected!',13,10,0
