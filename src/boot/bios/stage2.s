@@ -288,25 +288,6 @@ allocKernBuff:
     pop ds
 
 
-error32:
-    mov eax, cr0
-    and eax, 0x7FFFFFFF
-    mov cr0, eax
-    jmp 0x18:.realMode
-
-    [bits 16]
-    .real_mode:
-    mov realMode, cr0
-    and eax, 0x7FFFFFFE
-    mov cr0, eax
-    jmp 0x0:.finish
-
-    .finish:
-    xor ax, ax
-    mov ds, ax
-    mov es, ax
-    mov ss, ax
-    jmp error
 
 loadKernIntoMem:
     mov eax, dword [kernelSize]
@@ -428,7 +409,7 @@ moveSectorToTarget:
 
 
 enableVideoMode:
-    call vbe_init
+    call vbeInit
     jmp enableVideoModeDone ; TODO!add this marker later below
 
 
@@ -458,7 +439,7 @@ vbeInit:
 	jz	.noEdid
 	or	bx,bx
 	jz	.noEdid
-	mov	[wbeSuitableWidth],ax
+	mov	[vbeSuitableWidth],ax
 	mov	[vbeSuitableHeight],bx
 	mov	byte [vbeHasEdid],1
 	jmp	.noFlatPanel
@@ -572,41 +553,6 @@ vbeInit:
 	or	bx,bx
 	jnz	.setGraphicsMode
 
-    .setGraphicsMode:
-    or	bx, 0x4000
-	mov	cx,bx
-	mov	ax,0x4F02
-	int	0x10
-	cmp	ax,0x4F
-	jne	vbeFailed
-
-	; save mode info for the kernel
-	mov	ax,0x4F01
-	xor	di,di
-	int	0x10
-	mov	byte [es:0],1 
-	mov	al,[es:0x19]
-	mov	[es:1],al     
-	mov	ax,[es:0x12]
-	mov	[es:2],ax     
-	mov	ax,[es:0x14]
-	mov	[es:4],ax     
-	mov	ax,[es:0x10]
-	mov	[es:6],ax    
-	mov	eax,[es:40]
-	mov	[es:8],eax    
-	xor	eax,eax
-	mov	[es:12],eax
-	mov	ax,0x4F15
-	mov	bl,1
-	xor	cx,cx
-	xor	dx,dx
-	mov	di,0x10
-	int	0x10
-	mov	al,[vbeHasEdid]
-	shl	al,1
-	or	[es:0],al
-	ret
 
 ;Todo: handle the case of no suitable vbe
     .noSuitableVbe:
@@ -662,14 +608,77 @@ vbeInit:
     cmp	cx,dx
 	jb	.c1
 	mov	cx,0
-    
+    call	vbeSetHighlightedLine
+	xor	ax,ax
+	int	0x16
+	shr	ax,8
+	cmp	ax,72
+	jne	.k11
+	dec	cx
+    xor	ax,ax
+	int	0x16
+	shr	ax,8
+	cmp	ax,72
+	jne	.k11
+	dec	cx
+	.k11:
+	cmp	ax,80
+	jne	.k12
+	inc	cx
+	.k12:
+	cmp	ax,28
+	jne	.selectLoop
+
+	mov	di,cx
+	shl	di,1
+	add	di,0x200
+	mov	bx,[es:di]
+
+    .setGraphicsMode:
+    or	bx, 0x4000
+	mov	cx,bx
+	mov	ax,0x4F02
+	int	0x10
+	cmp	ax,0x4F
+	jne	vbeFailed
+
+	; save mode info for the kernel
+	mov	ax,0x4F01
+	xor	di,di
+	int	0x10
+	mov	byte [es:0],1 
+	mov	al,[es:0x19]
+	mov	[es:1],al     
+	mov	ax,[es:0x12]
+	mov	[es:2],ax     
+	mov	ax,[es:0x14]
+	mov	[es:4],ax     
+	mov	ax,[es:0x10]
+	mov	[es:6],ax    
+	mov	eax,[es:40]
+	mov	[es:8],eax    
+	xor	eax,eax
+	mov	[es:12],eax
+	mov	ax,0x4F15
+	mov	bl,1
+	xor	cx,cx
+	xor	dx,dx
+	mov	di,0x10
+	int	0x10
+	mov	al,[vbeHasEdid]
+	shl	al,1
+	or	[es:0],al
+	ret
+
 badVbe:
 	mov	byte [es:di],0
 	ret
 
-;TODO! implement this later
-;vbeFailed:
 
+vbeFailed:
+	mov	si,vbeFailed
+	call	vbePrintStr
+	jmp	vbeInit.selectLoop
 
 
 
@@ -727,26 +736,36 @@ vbePrintSpace:
 	int	0x10
 	popa
 	ret
+    
+vbeSetHighlightedLine:
+	pusha
+	mov	ax,0xB800
+	mov	fs,ax
+	mov	di,1
+	mov	dx,(80 * 25)
+	.clearLoop:
+	mov	byte [fs:di],0x07
+	add	di,2
+	dec	dx
+	cmp	dx,0
+	jne	.clearLoop
+	mov	ax,cx
+	add	ax,2
+	mov	cx,160
+	mul	cx
+	mov	dx,80
+	mov	di,ax
+	inc	di
+	.highlightLoop:
+	mov	byte [fs:di],0x70
+	add	di,2
+	dec	dx
+	cmp	dx,0
+	jne	.highlightLoop
+	popa
+	ret
 
-driveNumber db 0
-partitionEntry dw 0
-sectorCount dw 0
-headCount dw 0
-
-kernBuffer dq 0
-kernelSize dd 0
-
-pciError: db "Error: could not find PCI bus", 0
-noCpuIdError: db "Error: could not find CPUID", 0
-noMsrError: db "Error: could not find MSR", 0
-errorEnableA20: db "Error: could not enable A20 line", 0
-memoryMapGettingError: db "Error: could not get memory map", 0
-noMemory: db "Error: could not find memory for kernel", 0
-kernelSectorCountExceeded: db "Error: kernel sector count exceeded", 0
-errorReadingDisk: db "Error: could not read disk", 0
-
-
-wbeSuitableWidth: dw 0
+vbeSuitableWidth: dw 0
 vbeSuitableHeight: dw 0
 vbeSuitabeMode: dw 0
 vbeHasEdid: db 0
@@ -758,3 +777,119 @@ vbeS: db 'x',0
 vbeSpace: db ' ',0
 vbeBpp: db 'bpp',0
 vbeFailed: db 'This graphics mode could not be selected!',13,10,0
+
+enableVideoModeDone:
+    switchToProtectedMode:
+    cli
+    mov eax, cr0
+    or eax, 0x80000001
+    mov cr0, eax
+    jmp 0x8:protectedMode
+
+[bits 32]
+protectedMode:
+    mov ax, 0x10
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+
+checkElf:
+    mov ebx, [kernBuffer]
+    mov esi, notElf
+    cmp dword [ebx + 0], 0x464c457f
+    jne error32
+    mov esi, not64bitKernel
+    cmp byte [ebx + 4], 2
+    jne error32
+
+check64bitCpu:
+    mov ecx, 0x80000001
+    cpuid
+    mov esi, not64bitCpu
+    test eax, 0x20000000
+    jnz error32
+
+disablePaging:
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
+
+enableLongMode:
+    mov eax, cr4
+    or eax, 0x20
+    mov cr4, eax
+    mov ecx, 0xC0000080
+    rdmsr
+    or eax, 0x100
+    wrmsr
+    mov eax, cr0
+    or eax, 0x80000000
+    mov cr0, eax
+    jmp 0x48:longMode
+
+
+identityMapFirst4mb:
+    mov dword [pageTableAllocOffset], 0x5000
+    mov ecx, pageDirectoryLength
+    xor eax, eax
+    mov edi, pageDirectory
+    rep stosb
+    mov dword [pageDirectory + 0x1000 - 0x10], pageDirectory | 3
+    mov dword [pageDirectory], (pageDirectory + 0x1000) | 7
+    mov dword [pageDirectory + 0x1000], (pageDirectory + 0x2000) | 7
+    mov dword [pageDirectory + 0x2000], (pageDirectory + 0x3000) | 7
+    mov dword [pageDirectory + 0x2000 + 8], (pageDirectory + 0x4000) | 7
+    mov edi, pageDirectory + 0x3000
+    mov eax, 0x000003
+    mov ebx, 0x200003
+    mov ecx, 0x400
+
+    .identityLoop:
+    mov [edi], eax
+    add edi, 8
+    add eax, 0x1000
+    loop .identityLoop
+    mov eax, pageDirectory
+    mov cr3, eax
+
+
+error32:
+    mov eax, cr0
+    and eax, 0x7FFFFFFF
+    mov cr0, eax
+    jmp 0x18:.realMode
+
+    [bits 16]
+    .realMode:
+    mov realMode, cr0
+    and eax, 0x7FFFFFFE
+    mov cr0, eax
+    jmp 0x0:.finish
+
+    .finish:
+    xor ax, ax
+    mov ds, ax
+    mov es, ax
+    mov ss, ax
+    jmp error
+
+driveNumber db 0
+partitionEntry dw 0
+sectorCount dw 0
+headCount dw 0
+
+kernBuffer: dq 0
+kernelSize: dd 0
+pageTableAllocOffset: dq 0
+
+pciError: db "Error: could not find PCI bus", 0
+noCpuIdError: db "Error: could not find CPUID", 0
+noMsrError: db "Error: could not find MSR", 0
+errorEnableA20: db "Error: could not enable A20 line", 0
+memoryMapGettingError: db "Error: could not get memory map", 0
+noMemory: db "Error: could not find memory for kernel", 0
+kernelSectorCountExceeded: db "Error: kernel sector count exceeded", 0
+errorReadingDisk: db "Error: could not read disk", 0
+notElf: db "Error: not an ELF", 0
+not64bitKernel: db "Error: not a 64-bit kernel", 0
+not64bitCpu: db "Error: not a 64-bit CPU", 0
