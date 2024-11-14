@@ -873,6 +873,52 @@ error32:
     mov ss, ax
     jmp error
 
+
+[bits 64]
+
+longMode:
+    mov rax, 0x50
+    mov ds, rax
+    mov es, rax
+    mov ss, rax
+
+checkKernelElf:
+    mov rbx, [kernBuffer]
+    mov rsi, badKernelError
+    cmp byte [rbx + 5], 1
+    jne error64
+    cmp byte [rbx + 7], 0
+    jne error64
+    cmp byte [rbx + 16], 2
+    jne error64
+    cmp byte [rbx + 18], 0x3e
+    jne error64
+
+findProgramHeaders:
+    mov rax, rbx
+    mov rbx, [rax + 32]
+    add rbx, rax
+
+    .loopProgHeaders:
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    mov eax, [rbx]
+    cmp eax, 1
+    jne .nextEntry
+    mov rcx, [rbx + 40]
+    shr rcx, 12
+    inc rcx
+        mov rax, [rbx + 16]
+    shl rax, 16
+    shr rax, 16
+    mov [.targetPage], rax
+
+    .frameLoop:
+    xor rbx, rbx
+    ;Todo: loop mem regions
+
 driveNumber db 0
 partitionEntry dw 0
 sectorCount dw 0
@@ -893,3 +939,4 @@ errorReadingDisk: db "Error: could not read disk", 0
 notElf: db "Error: not an ELF", 0
 not64bitKernel: db "Error: not a 64-bit kernel", 0
 not64bitCpu: db "Error: not a 64-bit CPU", 0
+badKernelError: db "Error: Malformed kernel", 0
