@@ -266,7 +266,7 @@ allocKernBuff:
     mov eax, [loadMmap.pointer]
     cmp ebx, eax
     jne .memRegionLoop
-    mov si, noMemory
+    mov si, noMemError
     jmp error32
 
     .foundBuffer:
@@ -917,7 +917,125 @@ findProgramHeaders:
 
     .frameLoop:
     xor rbx, rbx
-    ;Todo: loop mem regions
+    
+    .memRegionLoop:
+    mov rax, [rbx + mMap + 8]
+    or rax, rax
+    jz .tryNextMemRegion
+    mov rax, [rbx + mMap + 0]
+    mov [.physicalPage], rax
+    add rax, 0x1000
+    mov [rbx + mMap + 0], rax
+    sub qword [rbx + mMap + 8], 1
+    jmp .foundPhysicalPage
+
+    .tryNextMemRegion:
+    add rbx, 16
+    mov eax, [loadMmap.pointer]
+    cmp ebx, eax
+    jne .memRegionLoop
+    mov si, noMemError
+    jmp error64
+
+    .foundPhysicalPage:
+    mov rax, [.targetPage]
+    shr rax, 39
+    mov r8, 0xFFFFFF7FBFDFE000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .hasPdp ;Todo: implement this
+    mov rbx, [pageTableAllocOffset]
+    add rbx, pageDirectory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [pageTableAllocOffset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .hasPdp:
+    mov rax, [.targetPage]
+    shr rax, 30
+    mov r8, 0xFFFFFF7FBFC00000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .hasPd
+    mov rbx, [pageTableAllocOffset]
+    add rbx, pageDirectory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [pageTableAllocOffset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .hasPd:
+    mov rax, [.targetPage]
+    shr rax, 21
+    mov r8, 0xFFFFFF7F80000000
+    mov rbx, [r8 + rax * 8]
+    cmp rbx, 0
+    jne .hasPt
+    mov rbx, [pageTableAllocOffset]
+    add rbx, pageDirectory
+    or rbx, 7
+    mov [r8 + rax * 8], rbx
+    add qword [pageTableAllocOffset], 0x1000
+    mov rax, cr3
+    mov cr3, rax
+
+    .hasPt:
+    mov rax, [.targetPage]
+    shr rax, 12
+    mov rbx, [.physicalPage]
+    or rbx, 0x103
+    shl rax, 3
+    xor r8, r8
+    mov r8, 0xFFFFFF00
+    shl r8, 32
+    add rax, r8
+    mov [rax], rbx
+    mov rbx, [.targetPage]
+    ;the corresponding TLB entry must be invalidated to ensure that the CPU does not use the old cached translation.
+    invlpg [rbx]
+
+    add qword [.targetPage], 0x1000
+    dec rcx
+    or rcx, rcx
+    jnz .frameLoop
+
+    ; restore the ptr to the segment
+    pop rbx
+    push rbx
+
+
+    mov rcx, [rbx + 40]
+    xor rax, rax
+    mov rdi, [rbx + 16]
+    rep stosb
+
+    mov rcx, [rbx + 32]
+    mov rsi, [rbx + 8]
+    add rsi, [kernBuffer]
+    mov rdi, [ebx + 16]
+    rep movsb
+
+    .nextEntry:
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+
+    add rbx, rdx
+    dec rcx
+    or rcx, rcx
+    jnz .loopProgHeaders
+
+    jmp loadKernelExecutable
+
+    .targetPage: dq 0
+    .physicalPage: dq 0
+
+
+;TODO!: implement loadKernelExecutable
 
 driveNumber db 0
 partitionEntry dw 0
@@ -933,7 +1051,7 @@ noCpuIdError: db "Error: could not find CPUID", 0
 noMsrError: db "Error: could not find MSR", 0
 errorEnableA20: db "Error: could not enable A20 line", 0
 memoryMapGettingError: db "Error: could not get memory map", 0
-noMemory: db "Error: could not find memory for kernel", 0
+noMemError: db "Error: could not find memory for kernel", 0
 kernelSectorCountExceeded: db "Error: kernel sector count exceeded", 0
 errorReadingDisk: db "Error: could not read disk", 0
 notElf: db "Error: not an ELF", 0
