@@ -287,8 +287,6 @@ allocKernBuff:
     pop es
     pop ds
 
-
-
 loadKernIntoMem:
     mov eax, dword [kernelSize]
     xor edx, edx
@@ -357,15 +355,6 @@ loadSector:
 
     ret
 
-
-
-readStructure:
-    dw 0x10
-    dw 1
-    dd temporaryLoadBuffer
-    .lba: dq 0
-
-
 moveSectorToTarget:
     push ss
     push ds
@@ -407,11 +396,21 @@ moveSectorToTarget:
     sti
     ret
 
+error:
+    .loop:
+    lodsb
+    or al, al
+    jz .break
+    mov ah, 0x0e
+    int 0x10
+    jmp .loop
+    .break:
+    cli
+    hlt
 
 enableVideoMode:
     call vbeInit
     jmp enableVideoModeDone ; TODO!add this marker later below
-
 
 
 vbeInit:
@@ -505,10 +504,10 @@ vbeInit:
 	mov	word [es:di + 20],280
 	mov	word [es:di + 22],283
 	mov	word [es:di + 24],0xFFFF
+
     .addedModes:
     mov	si,0x200
 	mov	di,0x200
-
 
     .checkLoop:
 	mov	cx,[es:si]
@@ -553,8 +552,6 @@ vbeInit:
 	or	bx,bx
 	jnz	.setGraphicsMode
 
-
-;Todo: handle the case of no suitable vbe
     .noSuitableVbe:
     mov	si,vbeSelectModePrompt
 	call	vbePrintStr
@@ -597,7 +594,6 @@ vbeInit:
 	inc	cx
 	add	bx,2
 	jmp	.printLoop
-
 
     .printDone:
 	mov	dx,cx
@@ -674,13 +670,10 @@ badVbe:
 	mov	byte [es:di],0
 	ret
 
-
 vbeFailed:
 	mov	si,vbeFailed
 	call	vbePrintStr
 	jmp	vbeInit.selectLoop
-
-
 
 vbePrintStr:
     pusha
@@ -779,6 +772,7 @@ vbeBpp: db 'bpp',0
 vbeFailed: db 'This graphics mode could not be selected!',13,10,0
 
 enableVideoModeDone:
+
     switchToProtectedMode:
     cli
     mov eax, cr0
@@ -1035,7 +1029,120 @@ findProgramHeaders:
     .physicalPage: dq 0
 
 
-;TODO!: implement loadKernelExecutable
+loadKernelExecutable:
+    mov rbx, [kernBuffer]
+    mov rcx, [rbx + 24]
+
+    xor eax, eax
+    mov ebx, [loadMmap.pointer]
+    mov [mMap + ebx + 4], eax
+    mov [mMap + ebx + 12], eax
+    mov [mMap + ebx + 16], eax
+    mov [mMap + ebx + 20], eax
+    mov eax, [mMap + ebx + 8]
+    mov [mMap + ebx + 24], eax
+    mov eax, [mMap + ebx + 12]
+    mov [mMap + ebx + 28], eax
+    mov eax, [kernBuffer]
+    mov [mMap + ebx], eax
+    mov eax, [kernelSize]
+    shr eax, 12
+    mov [mMap + ebx + 8], eax
+
+    mov rdi, 0xFFFFFF7FBFDFE000
+    mov rax, [rdi]
+    mov rdi, 0xFFFFFF7FBFDFEFE0
+    mov [rdi], rax
+    mov rax, cr3
+    mov cr3, rax
+
+    mov rax, 0xFFFFFE0000000000
+    add qword [gdtData.gdt2], rax
+    lgdt [gdtData.gdt]
+
+    xor rdi, rdi
+    mov rsi, 1
+    mov edx, [kernelSize]
+    jmp rcx
+
+
+gdtData:
+    .nullEntry dq 0 
+    .codeEntry: 
+        dd 0xffff 
+        db 0
+        dw 0xcf9a
+        db 0
+    .dataEntry:
+        dd 0xffff 
+        db 0
+        dw 0xcf92
+        db 0
+    .codeEntry16:
+        dd 0xffff 
+        db 0
+        dw 0x0f9a
+        db 0
+    .dataEntry16:
+        dd 0xffff 
+        db 0
+        dw 0x0f92
+        db 0
+    .userCode: 
+        dd 0xffff 
+        db 0
+        dw 0xcffa
+        db 0
+    .userData:
+        dd 0xffff 
+        db 0
+        dw 0xcff2
+        db 0
+    .tss:       
+        dd 0x68
+        db 0
+        dw 0xe9
+        db 0
+        dq 0
+    .codeEntry64: 
+        dd 0xffff 
+        db 0
+        dw 0xaf9a
+        db 0
+    .dataEntry64: 
+        dd 0xffff 
+        db 0
+        dw 0xaf92
+        db 0
+    .userCode64:
+        dd 0xffff 
+        db 0
+        dw 0xaffa
+        db 0
+    .userData64: 
+        dd 0xffff 
+        db 0
+        dw 0xaff2
+        db 0
+    .userCode64c: 
+        dd 0xffff 
+        db 0
+        dw 0xaffa
+        db 0
+    .gdt: dw (gdtData.gdt - gdtData - 1)
+    .gdt2: dq gdtData
+
+error64:
+    jmp far [.error32Ind]
+    .error32Ind:
+        dq error32
+        dd 8
+
+readStructure:
+    dw 0x10
+    dw 1
+    dd temporaryLoadBuffer
+    .lba: dq 0
 
 driveNumber db 0
 partitionEntry dw 0
