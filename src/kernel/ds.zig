@@ -576,3 +576,80 @@ pub const List = extern struct {
         self.nextOrFirst = null;
     }
 };
+
+pub fn Bitflag(comptime EnumType: type) type {
+    return extern struct {
+        const IntType = std.meta.Int(.unsigned, @bitSizeOf(EnumType));
+        const Enum = EnumType;
+
+        bits: IntType,
+
+        pub inline fn fromFlags(flags: anytype) @This() {
+            const result = comptime blk: {
+                const fields = std.meta.fields(@TypeOf(flags));
+                if (fields.len > @bitSizeOf(EnumType)) {
+                    @compileError("The number of flags exceeds the number of available bits in the EnumType.\n Ensure that the EnumType has enough bits to represent all flags.");
+                }
+
+                var bits: IntType = 0;
+
+                for (fields) |field| {
+                    const enumVal: EnumType = field.default_value.?;
+                    bits |= 1 << @intFromEnum(enumVal);
+                }
+                break :blk bits;
+            };
+            return @This(){ .bits = result };
+        }
+
+        pub fn fromBits(bits: IntType) @This() {
+            return @This(){ .bits = bits };
+        }
+
+        pub inline fn fromFlag(comptime flag: EnumType) @This() {
+            const bits = 1 << @intFromEnum(flag);
+            return @This(){ .bits = bits };
+        }
+
+        pub inline fn empty() @This() {
+            return @This(){
+                .bits = 0,
+            };
+        }
+
+        pub inline fn all() @This() {
+            const result = comptime blk: {
+                var bits: IntType = 0;
+                for (@typeInfo(EnumType).Enum.fields) |field| {
+                    bits |= 1 << field.value;
+                }
+                break :blk @This(){
+                    .bits = bits,
+                };
+            };
+            return result;
+        }
+
+        pub inline fn isEmpty(self: @This()) bool {
+            return self.bits == 0;
+        }
+
+        //Todo?: check if this is correct (I guess yes)
+        pub inline fn isAll(self: @This()) bool {
+            const validBits = all().bits;
+            return (self.bits & validBits) == self.bits and self.bits == validBits;
+        }
+
+        pub inline fn contains(self: @This(), comptime flag: EnumType) bool {
+            return ((self.bits & (1 << @intFromEnum(flag))) >> @intFromEnum(flag)) != 0;
+        }
+
+        pub inline fn orFlag(self: @This(), comptime flag: EnumType) @This() {
+            const bits = self.bits | 1 << @intFromEnum(flag);
+            return @This(){ .bits = bits };
+        }
+        pub inline fn orFlagMut(self: *@This(), comptime flag: EnumType) void {
+            self.bits |= 1 << @intFromEnum(flag);
+        }
+    };
+}
