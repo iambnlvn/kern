@@ -194,6 +194,101 @@ pub fn AVLTree(comptime T: type) type {
             fail,
         };
 
+        pub fn insert(self: *@This(), node: *Node, nodevalue: ?*T, key: KeyDefaultType, dupkeypol: DuplicateKeyPolicy) bool {
+            self.validate();
+
+            if (node.tree != null) {
+                panic("node already in a tree\n", .{});
+            }
+
+            node.tree = self;
+
+            node.key = zeroes(Key);
+            node.key.sKey = key;
+            node.children[0] = null;
+            node.children[1] = null;
+            node.value = nodevalue;
+            node.height = 1;
+
+            var link = &self.root;
+            var parent: ?*Node = null;
+
+            while (true) {
+                if (link.*) |n| {
+                    if (n.compare(node) == 0) {
+                        if (dupkeypol == .panic) panic("avl duplicate panic", .{}) else if (dupkeypol == .fail) return false;
+                    }
+
+                    const childIdx = @intFromBool(n.compare(n) > 0);
+                    link = &n.children[childIdx];
+                    parent = n;
+                } else {
+                    link.* = node;
+                    node.parent = parent;
+                    break;
+                }
+            }
+
+            var fakeRoot = zeroes(Node);
+            self.root.?.parent = &fakeRoot;
+            fakeRoot.tree = self;
+            fakeRoot.children[0] = self.root;
+
+            var itemIterator = node.parent.?;
+            //Todo: refactor this
+            while (itemIterator != &fakeRoot) {
+                const leftheight = if (itemIterator.children[0]) |left| left.height else 0;
+                const rightheight = if (itemIterator.children[1]) |right| right.height else 0;
+                const balance = leftheight - rightheight;
+                itemIterator.height = 1 + if (balance > 0) leftheight else rightheight;
+                var newRoot: ?*Node = null;
+                var oldParent = itemIterator.parent.?;
+
+                if (balance > 1 and Node.compareKeys(key, itemIterator.children[0].?.key.skey) <= 0) {
+                    const rightRot = itemIterator.rotateRight();
+                    newRoot = rightRot;
+                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
+                    oldParent.children[oldParentChilldIdx] = rightRot;
+                } else if (balance > 1 and Node.compareKeys(key, itemIterator.children[0].?.key.skey) > 0 and itemIterator.children[0].?.children[1] != null) {
+                    itemIterator.children[0] = itemIterator.children[0].?.rotateLeft();
+                    itemIterator.children[0].?.parent = itemIterator;
+                    const rightRot = itemIterator.rotateRight();
+                    newRoot = rightRot;
+                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
+                    oldParent.children[oldParentChilldIdx] = rightRot;
+                } else if (balance < -1 and Node.compareKeys(key, itemIterator.children[1].?.key.skey) > 0) {
+                    const leftRotation = itemIterator.rotateLeft();
+                    newRoot = leftRotation;
+                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
+                    oldParent.children[oldParentChilldIdx] = leftRotation;
+                } else if (balance < -1 and Node.compareKeys(key, itemIterator.children[1].?.key.skey) <= 0 and itemIterator.children[1].?.children[0] != null) {
+                    itemIterator.children[1] = itemIterator.children[1].?.rotateRight();
+                    itemIterator.children[1].?.parent = itemIterator;
+                    const leftRotation = itemIterator.rotateLeft();
+                    newRoot = leftRotation;
+                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
+                    oldParent.children[oldParentChilldIdx] = leftRotation;
+                }
+
+                if (newRoot) |newRootUnwrapped| newRootUnwrapped.parent = oldParent;
+                itemIterator = oldParent;
+            }
+
+            self.root = fakeRoot.children[0];
+            self.root.?.parent = null;
+
+            self.validate();
+            return true;
+        }
+
+        fn validate(self: *@This()) void {
+            if (self.root) |root| {
+                _ = root.validate(self, null);
+            } else {
+                return;
+            }
+        }
+
         pub const Node = extern struct {
             value: ?*T,
             children: [2]?*Node,
