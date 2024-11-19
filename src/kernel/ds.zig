@@ -202,7 +202,6 @@ pub fn AVLTree(comptime T: type) type {
             }
 
             node.tree = self;
-
             node.key = zeroes(Key);
             node.key.sKey = key;
             node.children[0] = null;
@@ -280,7 +279,117 @@ pub fn AVLTree(comptime T: type) type {
             self.validate();
             return true;
         }
+        // Todo: refactor this
+        pub fn remove(self: *@This(), node: *Node) void {
+            if (self.modcheck) panic("concurrent modification", .{});
+            self.modcheck = true;
+            defer self.modcheck = false;
 
+            self.validate();
+            if (node.tree != self) panic("node not in tree", .{});
+
+            var fakeRoot = zeroes(Node);
+            self.root.?.parent = &fakeRoot;
+            fakeRoot.tree = self;
+            fakeRoot.children[0] = self.root;
+
+            if (node.children[0] != null and node.children[1] != null) {
+                const smallest = 0;
+                const a = self.findRecuresively(node.children[1], smallest, .SmallestAboveOrEqual).?;
+                const b = node;
+                a.swap(b);
+            }
+
+            const link = &node.parent.?.children[@intFromBool(node.parent.?.children[1] == node)];
+            link.* = if (node.children[0]) |left| left else node.children[1];
+
+            node.tree = null;
+            var itemIter = blk: {
+                if (link.*) |linkUnwrapped| {
+                    linkUnwrapped.parent = node.parent;
+                    break :blk link.*.?;
+                } else break :blk node.parent.?;
+            };
+
+            while (itemIter != &fakeRoot) {
+                const leftHeight = if (itemIter.children[0]) |left| left.height else 0;
+                const rightHeight = if (itemIter.children[1]) |right| right.height else 0;
+                const balance = leftHeight - rightHeight;
+                itemIter.height = 1 + if (balance > 0) leftHeight else rightHeight;
+
+                var newRoot: ?*Node = null;
+                var oldParent = itemIter.parent.?;
+
+                if (balance > 1) {
+                    const leftBalance = if (itemIter.children[0]) |left| left.getBalanceFactor() else 0;
+                    if (leftBalance >= 0) {
+                        const rightRotation = itemIter.rotateRight();
+                        newRoot = rightRotation;
+                        const oldParentChildIdx = @intFromBool(oldParent.children[1] == itemIter);
+                        oldParent.children[oldParentChildIdx] = rightRotation;
+                    } else {
+                        itemIter.children[0] = itemIter.children[0].?.rotateLeft();
+                        itemIter.children[0].?.parent = itemIter;
+                        const rightRotation = itemIter.rotateRight();
+                        newRoot = rightRotation;
+                        const oldParentChildIdx = @intFromBool(oldParent.children[1] == itemIter);
+                        oldParent.children[oldParentChildIdx] = rightRotation;
+                    }
+                } else if (balance < -1) {
+                    const rightBalance = if (itemIter.children[1]) |left| left.getBalanceFactor() else 0;
+                    if (rightBalance <= 0) {
+                        const leftRotation = itemIter.rotateLeft();
+                        newRoot = leftRotation;
+                        const oldParentChildIdx = @intFromBool(oldParent.children[1] == itemIter);
+                        oldParent.children[oldParentChildIdx] = leftRotation;
+                    } else {
+                        itemIter.children[1] = itemIter.children[1].?.rotate_right();
+                        itemIter.children[1].?.parent = itemIter;
+                        const leftRotation = itemIter.rotateLeft();
+                        newRoot = leftRotation;
+                        const oldParentChildIdx = @intFromBool(oldParent.children[1] == itemIter);
+                        oldParent.children[oldParentChildIdx] = leftRotation;
+                    }
+                }
+
+                if (newRoot) |newRootUnwrapped| newRootUnwrapped.parent = oldParent;
+                itemIter = oldParent;
+            }
+
+            self.root = fakeRoot.children[0];
+            if (self.root) |root| {
+                if (root.parent != &fakeRoot) panic("incorrect root parent", .{});
+                root.parent = null;
+            }
+
+            self.validate();
+        }
+
+        pub fn findRecuresively(self: *@This(), maybeRoot: ?*Node, key: KeyDefaultType, searchMode: SearchMode) ?*Node {
+            if (maybeRoot) |root| {
+                if (Node.compareKeys(root.key.sKey, key) == 0) return root;
+
+                switch (searchMode) {
+                    .exact => return self.findRecuresively(root.children[0], key, searchMode),
+
+                    .SmallestAboveOrEqual => {
+                        if (Node.compareKeys(root.key.sKey, key) > 0) {
+                            if (self.findRecuresively(root.children[0], key, searchMode)) |node| return node else return root;
+                        } else {
+                            return self.findRecuresively(root.children[1], key, searchMode);
+                        }
+                    },
+
+                    .LargestBelowOrEqual => {
+                        if (Node.compareKeys(root.key.sKey, key) < 0) {
+                            if (self.findRecuresively(root.children[1], key, searchMode)) |node| return node else return root;
+                        } else return self.findRecuresively(root.children[0], key, searchMode);
+                    },
+                }
+            } else {
+                return null;
+            }
+        }
         fn validate(self: *@This()) void {
             if (self.root) |root| {
                 _ = root.validate(self, null);
