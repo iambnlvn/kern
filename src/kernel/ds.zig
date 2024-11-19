@@ -390,6 +390,13 @@ pub fn AVLTree(comptime T: type) type {
                 return null;
             }
         }
+
+        pub fn find(self: *@This(), key: KeyDefaultType, searchMode: SearchMode) ?*Node {
+            if (self.modcheck) panic("concurrent access\n", .{});
+            self.validate();
+            return self.findRecuresively(self.root, key, searchMode);
+        }
+
         fn validate(self: *@This()) void {
             if (self.root) |root| {
                 _ = root.validate(self, null);
@@ -526,3 +533,46 @@ pub fn AVLTree(comptime T: type) type {
         };
     };
 }
+
+pub const List = extern struct {
+    prevOrLast: ?*@This(),
+    nextOrFirst: ?*@This(),
+
+    pub fn insert(self: *@This(), node: *List, start: bool) void {
+        if (node.prevOrLast != null or node.nextOrFirst != null) {
+            panic("bad links", .{});
+        }
+
+        if (self.nextOrFirst == null and self.prevOrLast == null) {
+            node.prevOrLast = self;
+            node.nextOrFirst = self;
+            self.nextOrFirst = node;
+            self.prevOrLast = node;
+        } else if (start) {
+            node.prevOrLast = self;
+            node.nextOrFirst = self.nextOrFirst;
+            self.nextOrFirst.?.prevOrLast = node;
+            self.nextOrFirst = node;
+        } else {
+            node.prevOrLast = self.prevOrLast;
+            node.nextOrFirst = self;
+            self.prevOrLast.?.nextOrFirst = node;
+            self.prevOrLast = node;
+        }
+    }
+
+    pub fn remove(self: *@This()) void {
+        if (self.prevOrLast.?.nextOrFirst != self or self.nextOrFirst.?.prevOrLast != self) panic("bad links", .{});
+
+        if (self.prevOrLast == self.nextOrFirst) {
+            self.nextOrFirst.?.nextOrFirst = null;
+            self.nextOrFirst.?.prevOrLast = null;
+        } else {
+            self.prevOrLast.?.nextOrFirst = self.nextOrFirst;
+            self.nextOrFirst.?.prevOrLast = self.prevOrLast;
+        }
+
+        self.prevOrLast = null;
+        self.nextOrFirst = null;
+    }
+};
