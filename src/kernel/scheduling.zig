@@ -3,6 +3,7 @@ const ds = @import("./ds.zig");
 const LinkedList = ds.LinkedList;
 const kernel = @import("kernel.zig");
 const Volatile = kernel.Volatile;
+const SpinLock = kernel.SpinLock;
 
 pub const Thread = extern struct {
     inSafeCopy: bool,
@@ -145,4 +146,24 @@ const Process = extern struct {
         paused,
         terminated,
     };
+};
+
+pub const Scheduler = extern struct {
+    dispachSpinLock: SpinLock,
+    activeTimersSpinLock: SpinLock,
+    activeThreads: [Thread.priorityCount]LinkedList(Thread),
+    pausedThreads: LinkedList(Thread),
+    terminatedThreads: LinkedList(Thread),
+    asyncTaskSpinLock: SpinLock,
+    allThreads: LinkedList(Thread),
+    allProcesses: LinkedList(Process),
+    nextThreadID: u64,
+    nextProcessID: u64,
+    nextProcID: u64,
+    activeProcessCount: Volatile(u64),
+    blockShutdownProcCount: Volatile(u64),
+    started: Volatile(bool),
+    panic: Volatile(bool),
+    shutdown: Volatile(bool),
+    timeMs: Volatile(u64),
 };
