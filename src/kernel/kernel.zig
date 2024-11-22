@@ -1,6 +1,11 @@
 const std = @import("std");
 pub const SpinLock = @import("sync.zig").SpinLock;
-pub const scheduler = @import("scheduling.zig").Scheduler;
+pub const scheduling = @import("scheduling.zig");
+const Scheduler = scheduling.Scheduler;
+
+pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
+pub const MAX_WAIT_COUNT = 8;
+pub export var scheduler: Scheduler = undefined;
 
 pub fn Volatile(comptime T: type) type {
     return extern struct {
@@ -23,6 +28,10 @@ pub fn Volatile(comptime T: type) type {
 
         pub inline fn decrement(self: *volatile @This()) void {
             self.writeVolatile(self.readVolatile() - 1);
+        }
+
+        pub inline fn compareAndSwapAtom(self: *@This(), expectedValue: T, newVal: T) ?T {
+            return @cmpxchgStrong(@TypeOf(self.value), &self.value, expectedValue, newVal, .SeqCst, .SeqCst);
         }
     };
 }

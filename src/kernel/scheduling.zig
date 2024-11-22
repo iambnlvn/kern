@@ -1,9 +1,11 @@
 const std = @import("std");
-const ds = @import("./ds.zig");
+const ds = @import("ds.zig");
 const LinkedList = ds.LinkedList;
 const kernel = @import("kernel.zig");
 const Volatile = kernel.Volatile;
 const SpinLock = kernel.SpinLock;
+const Sync = @import("sync.zig");
+const Event = Sync.Event;
 
 pub const Thread = extern struct {
     inSafeCopy: bool,
@@ -38,6 +40,19 @@ pub const Thread = extern struct {
     executing: Volatile(bool),
     paused: Volatile(bool),
     yieldIpiReceived: Volatile(bool),
+    blocking: extern union {
+        // mutex: ?*volatile Mutex,
+        writer: extern struct {
+            // lock: ?*volatile WriterLock,
+            type: bool,
+        },
+        event: extern struct {
+            items: ?[*]volatile LinkedList(Thread).Node,
+            array: [kernel.MAX_WAIT_COUNT]?*volatile Event,
+            count: u64,
+        },
+    },
+    killedEvent: Event,
 
     pub const Priority = enum(i8) {
         normal = 0,
@@ -101,10 +116,10 @@ const Process = extern struct {
     blockShutdown: bool,
     preventNewThreads: bool,
     exitStatusCode: i32,
-
+    killedEvent: Event,
     execState: Process.ExecState,
     execStartRequest: bool,
-
+    execLoadAttempComplete: Event,
     execMainThread: ?*Thread,
 
     cpuTimeSlices: u64,
