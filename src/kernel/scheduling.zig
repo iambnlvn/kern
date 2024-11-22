@@ -1,6 +1,8 @@
 const std = @import("std");
 const ds = @import("./ds.zig");
 const LinkedList = ds.LinkedList;
+const kernel = @import("kernel.zig");
+const Volatile = kernel.Volatile;
 
 pub const Thread = extern struct {
     inSafeCopy: bool,
@@ -9,9 +11,12 @@ pub const Thread = extern struct {
     process: *Process,
     id: u64,
     execProcId: u32,
+    cpuTimeSlices: Volatile(u64),
+    handleCount: Volatile(u64),
 
     userStackBase: u64,
     userStackReserve: u64,
+    userStackCommit: Volatile(u64),
     kernelStackBase: u64,
     kernelStack: u64,
 
@@ -27,6 +32,11 @@ pub const Thread = extern struct {
     blockedThreadPriorities: [Thread.priorityCount]i32,
     policy: Thread.Policy,
     affinity: u32,
+    state: Volatile(Thread.state),
+    terminatableState: Volatile(Thread.TerminatableState),
+    executing: Volatile(bool),
+    paused: Volatile(bool),
+    yieldIpiReceived: Volatile(bool),
 
     pub const Priority = enum(i8) {
         normal = 0,
@@ -55,6 +65,12 @@ pub const Thread = extern struct {
         waitingWriterLock,
         terminated,
     };
+    pub const TerminatableState = enum(i8) {
+        invalidTerminatableState = 0,
+        terminatable = 1,
+        inSysCall,
+        userBlockRequest,
+    };
 
     pub const Policy = enum {
         FIFO,
@@ -76,6 +92,7 @@ const Process = extern struct {
     creationFlags: Process.CreationFlags,
     type: Process.Type,
     id: u64,
+    handleCount: Volatile(u64),
     allItems: LinkedList(Process).Node,
     crashed: bool,
     allThreadsPaused: bool,
