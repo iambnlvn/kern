@@ -29,7 +29,7 @@ pub const Event = extern struct {
     pub fn set(self: *Self, defaultFlag: ?bool) bool {
         const flag = defaultFlag orelse false;
         if (self.state.readVolatile() != 0 and !flag) {
-            std.debug.panic("Event already set");
+            std.debug.panic("Event already set", .{});
         }
 
         kernel.scheduler.dispachSpinLock.aquire();
@@ -50,7 +50,7 @@ pub const Event = extern struct {
 
     pub fn reset(self: *Self) void {
         if (self.blockedThreads.first != null and self.state.readVolatile() != 0) {
-            std.debug.panic("Event has blocked threads");
+            std.debug.panic("Event has blocked threads", .{});
         }
         self.state.writeVolatile(0);
     }
@@ -129,4 +129,103 @@ pub const Event = extern struct {
     //     }
     //     return std.math.maxInt(u64);
     // }
+};
+
+pub const WriterLock = extern struct {
+    blockedThreads: LinkedList(Thread),
+    state: Volatile(i64),
+    const Self = @This();
+
+    pub fn take(self: *Self, write: bool) bool {
+        return self.takeEx(write, false);
+    }
+
+    fn takeEx(self: *Self, write: bool, poll: bool) bool {
+        var done = false;
+        //This is a placeholder, until arch is implemented
+        const maybeCurrThread = arch.getCurrentThread();
+
+        if (maybeCurrThread) |thread| {
+            thread.blocking.writer.lock = self;
+            thread.blocking.writer.type = write;
+            @fence(.SeqCst);
+        }
+
+        while (true) {
+            kernel.scheduler.dispachSpinLock.aquire();
+
+            if (write) {
+                if (self.state.readVolatile() == 0) {
+                    self.state.writeVolatile(-1);
+                    done = true;
+                }
+            } else {
+                if (self.state.readVolatile() >= 0) {
+                    self.state.increment();
+                    done = true;
+                }
+            }
+
+            kernel.scheduler.dispachSpinLock.release();
+
+            if (poll or done) break else {
+                if (maybeCurrThread) |thread| {
+                    thread.state.writeVolatile(.waitingWriterLock);
+                    arch.fakeTimeInterrupt();
+                    thread.state.writeVolatile(.active);
+                } else {
+                    std.debug.panic("No current thread", .{}); // the scheduler should always have a current thread otherwise it is a bug(schuduler not ready)
+                }
+            }
+        }
+        return done;
+    }
+
+    pub fn returnLock(self: *Self, write: bool) void {
+        kernel.scheduler.dispachSpinLock.aquire();
+        const state = self.state.readVolatile();
+
+        switch (state) {
+            -1 => {
+                if (!write) kernel.panic("attempt to return shared access to an exclusively owned lock\n", .{});
+                self.state.writeVolatile(0);
+            },
+            0 => {
+                std.debug.panic("attempt to return access to an unowned lock\n", .{});
+            },
+            else => {
+                if (write) std.debug.panic("attempting to return exclusive access to a shared lock\n", .{});
+                self.state.decrement();
+            },
+        }
+
+        if (self.state.readVolatile() == 0) {
+            // Todo!: implement notifyObject
+            kernel.scheduler.notifyObject(&self.blockedThreads, true, null);
+        }
+
+        kernel.scheduler.dispachSpinLock.release();
+    }
+
+    pub fn assertLocked(self: *Self) void {
+        if (self.state.readVolatile() == 0) std.debug.panic("unlocked\n", .{});
+    }
+
+    pub fn assertExclusive(self: *Self) void {
+        const lockState = self.state.readVolatile();
+        if (lockState == 0) std.debug.panic("unlocked\n", .{}) else if (lockState > 0) std.debug.panic("shared mode\n", .{});
+    }
+
+    pub fn assertShared(self: *Self) void {
+        const state = self.state.readVolatile();
+        if (state == 0) std.debug.panic("unlocked\n", .{}) else if (state < 0) std.debug.panic("exclusive mode\n", .{});
+    }
+
+    pub fn convExclusiveToShared(self: *Self) void {
+        kernel.scheduler.dispachSpinLock.aquire();
+        self.assertExclusive();
+        self.state.writeVolatile(1);
+        kernel.scheduler.notifyObject(&self.blockedThreads, true, null);
+        kernel.scheduler.dispachSpinLock.release();
+    }
 };
