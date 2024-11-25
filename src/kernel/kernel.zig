@@ -39,7 +39,7 @@ pub fn Volatile(comptime T: type) type {
 pub const arch = blk: {
     const currentArch = @import("builtin").target.cpu.arch;
     switch (currentArch) {
-        .x86_64 => break :blk @import("arch/x8664.zig"), //Todo: implement arch
+        .x86_64 => break :blk @import("arch/x86_64.zig"), //Todo: implement arch
         else => @compileError(std.fmt.comptimePrint("Unsupported arch {s}\n", .{currentArch.genericName()})),
     }
 };
