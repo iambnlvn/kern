@@ -1,6 +1,6 @@
 const std = @import("std");
 const Thread = @import("./../kernel/scheduling.zig").Thread; //Todo: update the import path to come from kernel directly
-
+const List = @import("./../kernel/kernel.zig").ds.List;
 pub fn initThread(
     kernelStack: u64,
     kernelStackSize: u64,
@@ -89,6 +89,34 @@ pub extern fn switchContext(
     oldThread: *AddressSpace,
 ) callconv(.C) void;
 
+pub extern fn getLocalStorage() callconv(.C) ?*LocalStorage;
+pub extern fn getCurrentThread() callconv(.C) ?*Thread;
+
+const LocalStorage = extern struct {
+    currentThread: ?*Thread,
+    idleThread: ?*Thread,
+    asyncTaskThread: ?*Thread,
+    panicCtx: ?*InterruptContext,
+    IRQSwitchCtx: bool,
+    isSchedulerReady: bool,
+    isInIRQ: bool,
+    isInAsyncTask: bool,
+    processorID: 32,
+    spinlockCount: u64,
+    cpu: ?*CPU,
+    asyncTaskList: List,
+
+    //TODO: imlement get and set functions
+};
+pub const CPU = extern struct {
+    processorID: u8,
+    kernelProcessorID: u8,
+    APICID: u8,
+    isbootProcessor: bool,
+    kernelStack: *align(1) u64,
+    local: ?*LocalStorage,
+};
+
 pub const AddressSpace = extern struct {
     cr3: u64,
     commit: Commit,
@@ -106,3 +134,65 @@ const Commit = extern struct {
     const L2_COMMIT_SIZE = 1 << 14;
     const L3_COMMIT_SIZE = 1 << 5;
 };
+
+fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
+    return extern struct {
+        fn routine() callconv(.Naked) noreturn {
+            @setRuntimeSafety(false);
+            if (comptime !hasErrorCode) {
+                //push error code if it is not included
+                asm volatile (
+                    \\.intel_syntax noprefix
+                    \\push 0
+                );
+            }
+            //push interrupt number
+            asm volatile (".intel_syntax noprefix\npush " ++ std.fmt.comptimePrint("{}", .{num}));
+            //push general purpose regs onto the stack to save their state
+            asm volatile (
+                \\.intel_syntax noprefix
+                \\cld
+                \\push rax
+                \\push rbx
+                \\push rcx
+                \\push rdx
+                \\push rsi
+                \\push rdi
+                \\push rbp
+                \\push r8
+                \\push r9
+                \\push r10
+                \\push r11
+                \\push r12
+                \\push r13
+                \\push r14
+                \\push r15
+                \\mov rax, cr8
+                \\push rax
+                \\mov rax, 0x123456789ABCDEF
+                \\push rax
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\fxsave [rsp - 512]
+                \\mov rsp, rbx
+                \\sub rsp, 512 + 16
+                \\xor rax, rax
+                \\mov ax, ds
+                \\push rax
+                \\mov ax, 0x10
+                \\mov ds, ax
+                \\mov es, ax
+                \\mov rax, cr2
+                \\push rax
+                \\mov rdi, rsp
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\call InterruptHandler
+                \\mov rsp, rbx
+                \\xor rax, rax
+                \\jmp ReturnFromInterruptHandler
+            );
+            unreachable;
+        }
+    };
+}
