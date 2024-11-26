@@ -6,6 +6,7 @@ const Volatile = kernel.Volatile;
 const SpinLock = kernel.SpinLock;
 const Sync = @import("sync.zig");
 const Event = Sync.Event;
+const Mutex = Sync.Mutex;
 
 pub const Thread = extern struct {
     inSafeCopy: bool,
@@ -37,11 +38,12 @@ pub const Thread = extern struct {
     affinity: u32,
     state: Volatile(Thread.state),
     terminatableState: Volatile(Thread.TerminatableState),
+    terminating: Volatile(bool),
     executing: Volatile(bool),
     paused: Volatile(bool),
     yieldIpiReceived: Volatile(bool),
     blocking: extern union {
-        // mutex: ?*volatile Mutex,
+        mutex: ?*volatile Mutex,
         writer: extern struct {
             // lock: ?*volatile WriterLock,
             type: bool,
