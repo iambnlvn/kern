@@ -16,7 +16,13 @@ pub const SpinLock = extern struct {
     }
 
     // pub fn release(self: *Self) void {}
-    // pub fn assertLocked(self: *Self) void {}
+    pub fn assertLocked(self: *Self) void {
+        if (kernel.scheduler.panic.readVolatile()) return;
+
+        if (self.state.readVolatile() == 0 or arch.areInterruptsEnabled()) {
+            std.debug.panic("Spinlock not correctly acquired\n", .{});
+        }
+    }
 };
 
 pub const Event = extern struct {
@@ -308,5 +314,47 @@ pub const Mutex = extern struct {
             std.debug.panic("mutex aquire failed due to invalid owner thread", .{}); //Todo!: this should be a kernel panic
         }
         return true;
+    }
+
+    pub fn release(self: *Self) void {
+        if (kernel.scheduler.panic.readVolatile()) return;
+
+        self.assertLocked();
+
+        const maybeCurrentThread = arch.getCurrentThread();
+        kernel.scheduler.dispachSpinLock.aquire();
+        if (maybeCurrentThread) |currentThread| {
+            if (@cmpxchgStrong(?*align(1) volatile Thread, &self.ownerThread, currentThread, null, .SeqCst, .SeqCst) != null) {
+                std.debug.panic("mutex release failed due to invalid owner thread", .{});
+            }
+        } else {
+            self.ownerThread = null;
+        }
+
+        const preempt = self.blockedThreads.count != 0;
+
+        if (kernel.scheduler.started.readVolatile()) {
+            //Todo!: implement notifyObject
+            kernel.scheduler.notifyObject(&self.blockedThreads, preempt, null);
+        }
+
+        kernel.scheduler.dispachSpinLock.release();
+        if (preempt) arch.fakeTimeInterrupt();
+    }
+
+    pub fn assertLocked(self: *Self) void {
+        const currentThread = blk: {
+            if (arch.getCurentThread()) |th| {
+                break :blk @as(*align(1) Thread, @ptrCast(th));
+            } else {
+                break :blk @as(*align(1) Thread, @ptrFromInt(1));
+            }
+        };
+
+        if (self.ownerThread != currentThread) {
+            const ownerThreadId = if (self.ownerThread) |owner| owner.id else 0;
+            const currentThreadId = currentThread.id;
+            std.debug.panic("mutex not locked by current thread. Owner thread ID: {}, Current thread ID: {}", .{ ownerThreadId, currentThreadId }); //Todo!: this should be a kernel panic
+        }
     }
 };
