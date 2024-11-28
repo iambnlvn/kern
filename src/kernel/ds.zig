@@ -1,11 +1,6 @@
 const std = @import("std");
 const panic = std.debug.panic; //TODO!: this should be replaced with a kernel panic once implemented
-
-pub fn zeroes(comptime T: type) T {
-    var zValue: T = undefined;
-    std.mem.set(u8, std.mem.asBytes(&zValue), 0);
-    return zValue;
-}
+const zeroes = @import("kernel.zig").zeroes;
 
 pub fn LinkedList(comptime T: type) type {
     return extern struct {

@@ -5,6 +5,7 @@ const Thread = kernel.scheduling.Thread;
 const arch = kernel.arch;
 const LinkedList = @import("ds.zig").LinkedList;
 const zeroes = kernel.zeroes;
+
 pub const SpinLock = extern struct {
     state: Volatile(u8),
     ownerCpuId: Volatile(u8),
@@ -122,7 +123,7 @@ pub const Event = extern struct {
         if (timeOutInMS == kernel.WAIT_NO_TIMEOUT) {
             return self.waitMultiple(&ev, 1) == 0;
         } else {
-            var timer = zeroes(u8);
+            var timer = zeroes(u8); //TODO!: change this to a Timer struct
             timer.set(timeOutInMS);
             ev[1] = &timer.event;
             const index = waitMultiple(&ev, 2);
@@ -139,7 +140,7 @@ pub const Event = extern struct {
         const thread = arch.getCurrentThread().?;
         thread.blocking.event.count = events.len;
 
-        var evItems = std.mem.zeroes([512]LinkedList(Thread).Node);
+        var evItems = zeroes([512]LinkedList(Thread).Node);
         thread.blocking.event.items = &evItems;
 
         defer thread.blocking.event.items = null;
