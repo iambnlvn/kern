@@ -43,3 +43,9 @@ pub const arch = blk: {
         else => @compileError(std.fmt.comptimePrint("Unsupported arch {s}\n", .{currentArch.genericName()})),
     }
 };
+
+pub fn zeroes(comptime T: type) T {
+    var zeroVal: T = undefined;
+    @memset(std.mem.asBytes(&zeroVal), 0);
+    return zeroVal;
+}

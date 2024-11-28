@@ -4,18 +4,56 @@ const Volatile = kernel.Volatile;
 const Thread = kernel.scheduling.Thread;
 const arch = kernel.arch;
 const LinkedList = @import("ds.zig").LinkedList;
-
+const zeroes = kernel.zeroes;
 pub const SpinLock = extern struct {
     state: Volatile(u8),
     ownerCpuId: Volatile(u8),
     interruptsEnabled: Volatile(bool),
     const Self = @This();
-    //Todo!: implement
-    pub fn aquire() void {
+
+    pub fn aquire(self: *@This()) void {
         if (kernel.scheduler.panic.readVolatile()) return;
+        const interruptsEnabled = arch.areInterruptsEnabled();
+        arch.disableInterrupts();
+
+        const maybeLs = arch.getLocalStorage();
+
+        if (maybeLs) |ls| {
+            ls.spinLockCount += 1;
+        }
+
+        _ = self.state.compareAndSwapAtom(0, 1);
+        @fence(.SeqCst);
+        self.interruptsEnabled.writeVolatile(interruptsEnabled);
+
+        if (maybeLs) |ls| {
+            self.ownerCpuId.writeVolatile(@as(u8, ls.cpuId));
+        }
     }
 
-    // pub fn release(self: *Self) void {}
+    pub fn release(self: *Self) void {
+        self.releaseEx(false);
+    }
+
+    pub fn releaseEx(self: *@This(), comptime force: bool) void {
+        if (kernel.scheduler.panic.readVolatile()) return;
+
+        const maybeLs = arch.getLocalStorage();
+        if (maybeLs) |ls| {
+            ls.spinLockCount -= 1;
+        }
+
+        if (force) {
+            self.assertLocked();
+        }
+
+        const interruptsEnabledprev = self.interruptsEnabled.readVolatile();
+        @fence(.SeqCst);
+
+        self.state.writeVolatile(0);
+        if (interruptsEnabledprev) arch.enableInterrupts();
+    }
+
     pub fn assertLocked(self: *Self) void {
         if (kernel.scheduler.panic.readVolatile()) return;
 
@@ -46,7 +84,7 @@ pub const Event = extern struct {
 
             if (kernel.scheduler.started.readVolatile()) {
                 if (self.blockedThreads.count != 0) unblockedThreads.writeVolatile(true);
-                // Todo!: notify blocked threads
+                kernel.scheduler.notifyObject(&self.blockedThreads, &self.autoReset.readVolatile(), null);
             }
         }
 
@@ -84,57 +122,58 @@ pub const Event = extern struct {
         if (timeOutInMS == kernel.WAIT_NO_TIMEOUT) {
             return self.waitMultiple(&ev, 1) == 0;
         } else {
-            //Todo!: implement with a timer
+            var timer = zeroes(u8);
+            timer.set(timeOutInMS);
+            ev[1] = &timer.event;
+            const index = waitMultiple(&ev, 2);
+            timer.remove();
+            return index == 0;
         }
     }
 
-    // pub fn waitMultiple(_: Self, evPtr: [*]*Event, evLen: u64) u8 {
-    //     const events = evPtr[0..evLen];
-    //     if (events.len == 0) std.debug.panic("No events");
-    //     if (events.len > kernel.MAX_WAIT_COUNT) {
-    //         std.debug.panic("Too many events"); //TODO: this should be a kernel panic
-    //     }
-    //     //should also check if timer interrupt is enabled
+    pub fn waitMultiple(_: Self, evPtr: [*]*Event, evLen: u64) u8 {
+        const events = evPtr[0..evLen];
+        if (events.len == 0) std.debug.panic("No events") else if (events.len > kernel.MAX_WAIT_COUNT) std.debug.panic("Too many events", .{}) else if (!arch.areInterruptsEnabled()) std.debug.panic("Interrupts disabled", .{});
 
-    //     //Note: the following code is not implemented yet, it is just a placeholder
-    //     const thread = arch.getCurentThread().?;
-    //     thread.blocking.event.count = events.len;
+        //Note: the following code is not implemented yet, it is just a placeholder
+        const thread = arch.getCurrentThread().?;
+        thread.blocking.event.count = events.len;
 
-    //     var evItems = std.mem.zeroes([512]LinkedList(Thread).Node);
-    //     thread.blocking.event.items = &evItems;
+        var evItems = std.mem.zeroes([512]LinkedList(Thread).Node);
+        thread.blocking.event.items = &evItems;
 
-    //     defer thread.blocking.event.items = null;
+        defer thread.blocking.event.items = null;
 
-    //     for (thread.blocking.event.items.?[0..thread.blocking.event.count], 0..) |*evItem, i| {
-    //         evItem.value = thread;
-    //         thread.blocking.event.array[i] = events[i];
-    //     }
-    //     while (!thread.terminatableState.readVolatile() or thread.terminatableState.readVolatile() != .userBlockRequest) {
-    //         for (events, 0..) |event, i| {
-    //             if (event.autoReset.readVolatile()) {
-    //                 if (event.state.readVolatile() != 0) {
-    //                     thread.state.writeVolatile(.active);
-    //                     const result = event.state.compareAndSwapAtom(0, 1);
-    //                     if (result) |resultUnwrapped| {
-    //                         if (resultUnwrapped != 0) return i;
-    //                     } else {
-    //                         return i;
-    //                     }
+        for (thread.blocking.event.items.?[0..thread.blocking.event.count], 0..) |*evItem, i| {
+            evItem.value = thread;
+            thread.blocking.event.array[i] = events[i];
+        }
+        while (!thread.terminatableState.readVolatile() or thread.terminatableState.readVolatile() != .userBlockRequest) {
+            for (events, 0..) |event, i| {
+                if (event.autoReset.readVolatile()) {
+                    if (event.state.readVolatile() != 0) {
+                        thread.state.writeVolatile(.active);
+                        const result = event.state.compareAndSwapAtom(0, 1);
+                        if (result) |resultUnwrapped| {
+                            if (resultUnwrapped != 0) return i;
+                        } else {
+                            return i;
+                        }
 
-    //                     thread.state.writeVolatile(.waitingEvent);
-    //                 }
-    //             } else {
-    //                 if (event.state.readVolatile() != 0) {
-    //                     thread.state.writeVolatile(.active);
-    //                     return i;
-    //                 }
-    //             }
-    //         }
+                        thread.state.writeVolatile(.waitingEvent);
+                    }
+                } else {
+                    if (event.state.readVolatile() != 0) {
+                        thread.state.writeVolatile(.active);
+                        return i;
+                    }
+                }
+            }
 
-    //         arch.fakeTimeInterrupt();
-    //     }
-    //     return std.math.maxInt(u64);
-    // }
+            arch.fakeTimeInterrupt();
+        }
+        return std.math.maxInt(u64);
+    }
 };
 
 pub const WriterLock = extern struct {
@@ -206,7 +245,6 @@ pub const WriterLock = extern struct {
         }
 
         if (self.state.readVolatile() == 0) {
-            // Todo!: implement notifyObject
             kernel.scheduler.notifyObject(&self.blockedThreads, true, null);
         }
 
@@ -334,7 +372,6 @@ pub const Mutex = extern struct {
         const preempt = self.blockedThreads.count != 0;
 
         if (kernel.scheduler.started.readVolatile()) {
-            //Todo!: implement notifyObject
             kernel.scheduler.notifyObject(&self.blockedThreads, preempt, null);
         }
 
