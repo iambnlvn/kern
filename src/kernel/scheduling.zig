@@ -183,4 +183,126 @@ pub const Scheduler = extern struct {
     panic: Volatile(bool),
     shutdown: Volatile(bool),
     timeMs: Volatile(u64),
+
+    pub fn notifyObject(
+        self: *@This(),
+        blockedThreads: *LinkedList(Thread),
+        unblockAll: bool,
+        prevMutexOwner: ?*Thread,
+    ) void {
+        self.dispachSpinLock.assertLocked();
+        var unblockedThread = blockedThreads.first;
+        if (unblockedThread == null) return;
+
+        while (true) {
+            if (@intFromPtr(unblockedThread)) {
+                std.debug.panic("unblockedThread is null");
+            }
+
+            const nextUnblockedThread = unblockedThread.?.next;
+            const nextUnblockedThreadValue = nextUnblockedThread.?.value.?;
+
+            self.unblockThread(nextUnblockedThreadValue, prevMutexOwner);
+            unblockedThread = nextUnblockedThread;
+            if (!(unblockedThread != null and unblockAll)) break;
+        }
+    }
+
+    pub fn unblockThread(self: *@This(), unblockedThread: *Thread, prevMutexOwner: ?*Thread) void {
+        _ = prevMutexOwner;
+
+        self.dispachSpinLock.assertLocked();
+        switch (unblockedThread.state.readVolatile()) {
+            .waitingMutex => {
+                if (unblockedThread.blocking.mutex == null) {
+                    std.debug.panic("unblockedThread.blocking.mutex is null");
+                }
+                unblockedThread.blocking.mutex.?.unlock();
+            },
+            .waitingEvent => {
+                if (unblockedThread.blocking.event.items == null) {
+                    std.debug.panic("unblockedThread.blocking.event.items is null");
+                }
+                if (unblockedThread.blocking.event.count == 0) {
+                    std.debug.panic("unblockedThread.blocking.event.count is 0");
+                }
+                unblockedThread.blocking.event.count -= 1;
+                if (unblockedThread.blocking.event.count == 0) {
+                    unblockedThread.state.writeVolatile(Thread.state.active);
+                }
+            },
+            .waitingWriterLock => {
+                if (unblockedThread.blocking.writer.type) {
+                    std.debug.panic("unblockedThread.blocking.writer.type is true");
+                }
+                unblockedThread.state.writeVolatile(Thread.state.active);
+            },
+            else => std.debug.panic("Unexpected or invalid thread state", .{}),
+        }
+        unblockedThread.state.writeVolatile(.active);
+        if (!unblockedThread.executing.readVolatile()) {
+            self.addThreadToActiveThreads(unblockedThread, true);
+        }
+    }
+
+    pub fn addThreadToActiveThreads(self: *@This(), thread: Thread, isFirst: bool) void {
+        if (thread.type == .asyncTask) return;
+
+        self.ensureThreadIsActive(thread);
+        self.ensureThreadIsNotExecuting(thread);
+        self.ensureThreadIsNormal(thread);
+        self.ensureThreadPriorityIsValid(thread);
+        self.ensureThreadIsNotInList(thread);
+
+        if (thread.paused.readVolatile() and thread.terminatableState.readVolatile() == .terminatable) {
+            self.pausedThreads.prepend(&thread.item);
+        } else {
+            const priority = @as(u64, @intCast(self.getThreadEffectivePriority(thread)));
+            if (isFirst) {
+                self.activeThreads[priority].prepend(&thread.item);
+            } else {
+                self.activeThreads[priority].append(&thread.item);
+            }
+        }
+    }
+
+    fn ensureThreadIsActive(_: *@This(), thread: Thread) void {
+        if (thread.state.readVolatile() != .active) {
+            std.debug.panic("Thread is not active", .{});
+        }
+    }
+
+    fn ensureThreadIsNotExecuting(_: *@This(), thread: Thread) void {
+        if (thread.executing.readVolatile()) {
+            std.debug.panic("Thread is executing", .{});
+        }
+    }
+
+    fn ensureThreadIsNormal(_: *@This(), thread: Thread) void {
+        if (thread.type != .normal) {
+            std.debug.panic("Thread is not normal", .{});
+        }
+    }
+
+    fn ensureThreadPriorityIsValid(_: *@This(), thread: Thread) void {
+        if (thread.priority < 0) {
+            std.debug.panic("Thread priority is less than 0", .{});
+        } else if (thread.priority >= Thread.priorityCount) {
+            std.debug.panic("Thread priority is greater than or equal to priorityCount", .{});
+        }
+    }
+
+    fn ensureThreadIsNotInList(_: *@This(), thread: Thread) void {
+        if (thread.item.list != null) {
+            std.debug.panic("Thread is already in a list", .{});
+        }
+    }
+
+    pub fn getThreadEffectivePriority(self: *@This(), thread: *Thread) i8 {
+        self.dispachSpinLock.assertLocked();
+        for (thread.blockedThreadPriorities[0..@as(u64, @intCast(thread.priority))], 0..) |priority, idx| {
+            if (priority != 0) return @as(i8, @intCast(idx));
+        }
+        return thread.priority;
+    }
 };
