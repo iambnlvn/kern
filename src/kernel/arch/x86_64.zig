@@ -1,6 +1,9 @@
 const std = @import("std");
-const Thread = @import("./../kernel/scheduling.zig").Thread; //Todo: update the import path to come from kernel directly
-const List = @import("./../kernel/kernel.zig").ds.List;
+const kernel = @import("./../kernel.zig");
+const Thread = kernel.scheduling.Thread;
+const List = kernel.ds.List;
+const Mutex = kernel.sync.Mutex;
+
 pub fn initThread(
     kernelStack: u64,
     kernelStackSize: u64,
@@ -91,6 +94,12 @@ pub extern fn switchContext(
 
 pub extern fn getLocalStorage() callconv(.C) ?*LocalStorage;
 pub extern fn getCurrentThread() callconv(.C) ?*Thread;
+pub extern fn areInterruptsEnabled() callconv(.C) bool;
+pub extern fn ProcessorReadTimeStamp() callconv(.C) u64;
+pub extern fn halt() callconv(.C) noreturn;
+pub extern fn enableInterrupts() callconv(.C) void;
+pub extern fn debugOutByte(byte: u8) callconv(.C) void;
+pub extern fn disableInterrupts() callconv(.C) void;
 
 const LocalStorage = extern struct {
     currentThread: ?*Thread,
@@ -122,7 +131,7 @@ pub const AddressSpace = extern struct {
     commit: Commit,
     commitedPagePerTable: u64,
     activePageTableCount: u64,
-    // mutex: Mutex, //TODO!: implement
+    mutex: Mutex,
 };
 const Commit = extern struct {
     L1: [*]u8,
@@ -134,6 +143,41 @@ const Commit = extern struct {
     const L2_COMMIT_SIZE = 1 << 14;
     const L3_COMMIT_SIZE = 1 << 5;
 };
+export fn InterruptHandler(ctx: *InterruptContext) callconv(.C) void {
+    if (kernel.scheduler.panic.readVolatile() and ctx.intNum != 2) return;
+    if (areInterruptsEnabled()) std.debug.panic("interrupts were enabled at the start of the interrupt handler", .{});
+
+    const interrupt = ctx.intNum;
+    var maybeLS = getLocalStorage();
+    if (maybeLS) |ls| {
+        if (ls.currentThread) |currentThread| currentThread.lastInterruptTicks = ProcessorReadTimeStamp();
+        if (ls.spinlockCount != 0 and ctx.cr8 != 0xe) std.debug.panic("spinlock count is not zero", .{});
+    }
+
+    if (interrupt < 0x20) {
+        if (interrupt == 2) {
+            maybeLS.?.panicCtx = ctx;
+            halt();
+        }
+
+        const supervisor = ctx.cs & 3 == 0;
+
+        if (!supervisor) {
+            if (ctx.cs != 0x5b and ctx.cs != 0x6b) std.debug.panic("Invalid CS", .{});
+            const currentThread = getCurrentThread().?;
+            if (currentThread.isKernelThread) std.debug.panic("Kernel thread is executing user code", .{});
+
+            currentThread.terminatableState.writeVolatile(.inSysCall);
+
+            if (maybeLS) |ls| if (ls.spinlockCount != 0) std.debug.panic("user exception occurred with spinlock acquired", .{});
+
+            enableInterrupts();
+            maybeLS = null;
+
+            // TODO!: I have no clue what to do next
+        }
+    }
+}
 
 fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
     return extern struct {

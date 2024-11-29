@@ -6,6 +6,7 @@ pub const ds = @import("ds.zig");
 pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
 pub const MAX_WAIT_COUNT = 8;
 pub export var scheduler: Scheduler = undefined;
+pub const sync = @import("sync.zig");
 
 pub fn Volatile(comptime T: type) type {
     return extern struct {
@@ -49,3 +50,10 @@ pub fn zeroes(comptime T: type) T {
     @memset(std.mem.asBytes(&zeroVal), 0);
     return zeroVal;
 }
+
+//Todo!: implement a way to write to the screen
+// This function is intended to be called when the kernel encounters an unrecoverable error.
+// pub fn kPanic(message: []const u8) noreturn {
+//     arch.disableInterrupts();
+//     arch.halt();
+// }
