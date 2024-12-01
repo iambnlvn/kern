@@ -7,7 +7,7 @@ pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
 pub const MAX_WAIT_COUNT = 8;
 pub export var scheduler: Scheduler = undefined;
 pub const sync = @import("sync.zig");
-
+pub const memory = @import("memory.zig");
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,
