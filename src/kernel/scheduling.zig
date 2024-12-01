@@ -103,6 +103,7 @@ pub const Thread = extern struct {
 const Process = extern struct {
     // addrSpace: *AddrSpace, //Todo!: implement this
     threads: LinkedList(Thread),
+    threadsMutex: Mutex,
     // execNode: ?*Node, //Todo!: implement this
     execName: ?[32]u8,
     data: ProcCreateData,
@@ -113,6 +114,8 @@ const Process = extern struct {
     handleCount: Volatile(u64),
     allItems: LinkedList(Process).Node,
     crashed: bool,
+    crashMutex: Mutex,
+    crashReason: kernel.CrashReason,
     allThreadsPaused: bool,
     allThreadsTerminated: bool,
     blockShutdown: bool,
@@ -163,6 +166,45 @@ const Process = extern struct {
         paused,
         terminated,
     };
+
+    pub fn crash(self: *Process, crashReason: *kernel.CrashReason) callconv(.C) void {
+        if (self == &kernel.process) std.debug.panic("kernel process has crashed", .{});
+        if (self.type != .normal) std.debug.panic("A critical process has crashed", .{});
+
+        const pauseFlag = false;
+        _ = self.crashMutex.aquire();
+        if (!self.crashed) {
+            self.crashed = true;
+            pause = true;
+
+            self.crashReason = crashReason.*;
+            if (!kernel.scheduler.shutdown.readVolatile()) {
+                // notify the desktop
+            }
+        }
+
+        self.crashMutex.release();
+
+        if (pauseFlag) {
+            self.pause(false);
+        }
+    }
+
+    pub fn pause(self: *Process, resumeAfter: bool) callconv(.C) void {
+        _ = resumeAfter;
+        _ = self.threadsMutex.acquire();
+        var maybreThreadNode = self.threads.first;
+
+        while (maybreThreadNode) |threadNode| {
+            const thread = threadNode.value.?;
+            maybreThreadNode = threadNode.next;
+            _ = thread;
+            //TODO: implement a way to pause a thread
+            // ThreadPause(thread, resumeAfter);
+        }
+
+        self.threadsMutex.release();
+    }
 };
 
 pub const Scheduler = extern struct {
