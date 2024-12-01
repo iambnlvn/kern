@@ -57,3 +57,22 @@ pub fn zeroes(comptime T: type) T {
 //     arch.disableInterrupts();
 //     arch.halt();
 // }
+
+pub const CrashReason = extern struct {
+    errorCode: FatalError,
+    duringSysCall: i32,
+};
+
+pub const FatalError = enum(u32) {
+    abort,
+    incorrectFileAccess,
+    incorrectNodeType,
+    insufficientPermissions,
+    invalidBuffer,
+    invalidHandle,
+    invalidMemoryRegion,
+    outOfRange,
+    processorException,
+    recursiveBatch,
+    unknownSyscall,
+};
