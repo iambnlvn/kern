@@ -14,7 +14,7 @@ pub fn LinkedList(comptime T: type) type {
             list: ?*LinkedList(T),
             value: ?*T,
 
-            pub fn remove_from_list(self: *@This()) void {
+            pub fn removeFromList(self: *@This()) void {
                 if (self.list) |list| {
                     list.remove(self);
                 } else {
@@ -648,3 +648,19 @@ pub fn Bitflag(comptime EnumType: type) type {
         }
     };
 }
+
+pub const BitSet = extern struct {
+    singleUsage: [*]u32,
+    groupUsage: [*]u16,
+    singleUsageCount: u64,
+    groupdUsageCount: u64,
+    const groupSize = 0x1000;
+    const Self = @This();
+
+    pub fn init(self: *Self, count: u64, mapAll: bool) void {
+        self.singleUsageCount = (count + 31) & ~@as(u64, 31);
+        self.groupdUsageCount = self.singleUsageCount / groupSize + 1;
+        _ = mapAll;
+        //TODO!: figure it out
+    }
+};

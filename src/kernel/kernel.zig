@@ -8,6 +8,12 @@ pub const MAX_WAIT_COUNT = 8;
 pub export var scheduler: Scheduler = undefined;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
+
+pub export var coreAddressSpace: memory.AddressSpace = undefined;
+pub export var mmCoreRegions: [*]memory.Region = undefined;
+pub export var mmCoreRegionCount: u64 = 0;
+pub export var addrSpace: memory.AddressSpace = undefined;
+
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,

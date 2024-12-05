@@ -316,7 +316,7 @@ pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlag
         if (va >= lowMemMapStart and va < lowMemMapStart + lowMemLimit and forSupervisor) {
             const physicalAddr = va - lowMemMapStart;
             const mapPageFlags = memory.MapPageFlags.fromFlag(.commitTablesNow);
-            _ = mapPage(&kernel.addrSpace, physicalAddr, va, mapPageFlags); //TODO!: implement mapPage
+            _ = mapPage(&kernel.addrSpace, physicalAddr, va, mapPageFlags);
             return true;
         } else if (va >= coreMemStartRegion and va < coreMemStartRegion + coreMemRegionCount * @sizeOf(memory.Region) and forSupervisor) {
             const physicalAllocationFlags = memory.Physical.Flags.fromFlag(.zeroed);
@@ -348,4 +348,13 @@ export fn MMArchIsBufferInUserRange(baseAddr: u64, byteCount: u64) callconv(.C) 
     if (byteCount & 0xFFFF800000000000 != 0) return false;
     if ((baseAddr + byteCount) & 0xFFFF800000000000 != 0) return false;
     return true;
+}
+
+pub export fn mapPage(space: *memory.AddressSpace, physicalAddr: u64, va: u64, flags: memory.MapPageFlags) callconv(.C) bool {
+    _ = space;
+    _ = flags;
+    if ((va | physicalAddr) & (pageSize - 1) != 0) {
+        std.debug.panic("Pages are not aligned", .{});
+    }
+    //TODO: figure it out
 }
