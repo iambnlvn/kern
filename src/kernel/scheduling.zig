@@ -7,6 +7,8 @@ const SpinLock = kernel.SpinLock;
 const Sync = @import("sync.zig");
 const Event = Sync.Event;
 const Mutex = Sync.Mutex;
+const memory = kernel.memory.AddressSpace;
+const arch = @import("./arch/x86_64.zig");
 
 pub const Thread = extern struct {
     inSafeCopy: bool,
@@ -100,11 +102,22 @@ pub const Thread = extern struct {
     };
 };
 
-const Process = extern struct {
-    // addrSpace: *AddrSpace, //Todo!: implement this
+pub const Node = extern struct {
+    driverNode: u64,
+    handleCount: Volatile(u64),
+    dirEntry: u64,
+    filesystem: u64,
+    id: u64,
+    writerLock: Sync.WriterLock,
+    nodeError: i64,
+    flags: Volatile(u32),
+    cacheItem: kernel.ds.List,
+};
+pub const Process = extern struct {
+    addrSpace: *memory.AddressSpace,
     threads: LinkedList(Thread),
     threadsMutex: Mutex,
-    // execNode: ?*Node, //Todo!: implement this
+    execNode: ?*Node,
     execName: ?[32]u8,
     data: ProcCreateData,
     permissions: Process.Permission,
@@ -191,16 +204,14 @@ const Process = extern struct {
     }
 
     pub fn pause(self: *Process, resumeAfter: bool) callconv(.C) void {
-        _ = resumeAfter;
-        _ = self.threadsMutex.acquire();
+        _ = self.threadsMutex.aquire();
         var maybreThreadNode = self.threads.first;
 
         while (maybreThreadNode) |threadNode| {
             const thread = threadNode.value.?;
             maybreThreadNode = threadNode.next;
-            _ = thread;
-            //TODO: implement a way to pause a thread
-            // ThreadPause(thread, resumeAfter);
+
+            ThreadPause(thread, resumeAfter);
         }
 
         self.threadsMutex.release();
@@ -348,3 +359,36 @@ pub const Scheduler = extern struct {
         return thread.priority;
     }
 };
+
+export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
+    kernel.scheduler.dispachSpinLock.aquire();
+
+    if (thread.paused.readVolatile() == !resumeAfter) return;
+
+    thread.paused.writeVolatile(!resumeAfter);
+
+    if (!resumeAfter and thread.terminatableState.readVolatile() == .terminatable) {
+        if (thread.state.readVolatile() == .active) {
+            if (thread.executing.readVolatile()) {
+                if (thread == arch.getCurrentThread()) {
+                    kernel.scheduler.dispachSpinLock.release();
+
+                    arch.fakeTimerInterrupt();
+
+                    if (thread.paused.readVolatile()) std.debug.panic("current thread incorrectly resumed", .{});
+                } else {
+                    //TODO: implement IPI
+                }
+            } else {
+                thread.item.removeFromList();
+                kernel.scheduler.addThreadToActiveThreads(thread, false);
+            }
+        }
+    } else if (resumeAfter and thread.item.list == &kernel.scheduler.pausedThreads) {
+        kernel.scheduler.pausedThreads.remove(&thread.item);
+        kernel.scheduler.addThreadToActiveThreads(thread, false);
+    }
+
+    kernel.scheduler.dispachSpinLock.release();
+}
+//TODO!: implement AsyncTask
