@@ -488,46 +488,57 @@ pub const Heap = extern struct {
         if (!self.canValidate) return;
 
         for (self.blocks[0..self.blockCount.readVolatile()], 0..) |maybeStart, i| {
-            if (maybeStart) |start| {
-                const end = @intFromPtr(@as(*HeapRegion, @ptrFromInt(self.blocks[i])) + 65536);
-                var maybePrev: ?*HeapRegion = null;
-                var region = start;
+            if (!maybeStart) continue;
 
-                while (@intFromPtr(region) < @intFromPtr(end)) {
-                    if (maybePrev) |previous| {
-                        if (@intFromPtr(previous) != @intFromPtr(region.getPrev())) {
-                            std.debug.panic("heap panic", .{});
-                        }
-                    } else {
-                        if (region.previous != 0) std.debug.panic("heap panic", .{});
-                    }
+            const start = maybeStart;
+            const end = @intFromPtr(@as(*HeapRegion, @ptrFromInt(self.blocks[i])) + 65536);
+            var maybePrev: ?*HeapRegion = null;
+            var region = start;
 
-                    if (region.u1.size & 31 != 0) std.debug.panic("heap panic", .{});
+            while (@intFromPtr(region) < @intFromPtr(end)) {
+                validateRegion(start, region, maybePrev);
 
-                    if (@intFromPtr(region) - @intFromPtr(start) != region.offset) {
-                        std.debug.panic("heap panic", .{});
-                    }
-
-                    if (region.used != HeapRegion.usedMagic and region.used != 0) {
-                        std.debug.panic("Heap panic", .{});
-                    }
-
-                    if (region.used == 0 and region.regionListRef == null) {
-                        std.debug.panic("heap panic", .{});
-                    }
-
-                    if (region.used == 0 and region.u2.regionListNext != null and region.u2.regionListNext.?.regionListRef != &region.u2.regionListNext) {
-                        std.debug.panic("heap panic", .{});
-                    }
-
-                    maybePrev = region;
-                    region = region.getNext().?;
-                }
-
-                if (region != end) {
-                    std.debug.panic("heap panic", .{});
-                }
+                maybePrev = region;
+                region = region.getNext().?;
             }
+
+            if (region != end) {
+                std.debug.panic("heap panic: region does not match expected end", .{});
+            }
+        }
+    }
+
+    fn validateRegion(start: *HeapRegion, region: *HeapRegion, maybePrev: ?*HeapRegion) void {
+        if (maybePrev) |previous| {
+            if (@intFromPtr(previous) != @intFromPtr(region.getPrev())) {
+                std.debug.panic("heap panic: previous region mismatch", .{});
+            }
+        } else {
+            if (region.previous != 0) {
+                std.debug.panic("heap panic: invalid previous pointer for first region", .{});
+            }
+        }
+
+        if (region.u1.size & 31 != 0) {
+            std.debug.panic("heap panic: size misalignment", .{});
+        }
+
+        if (@intFromPtr(region) - @intFromPtr(start) != region.offset) {
+            std.debug.panic("heap panic: offset mismatch", .{});
+        }
+
+        if (region.used != HeapRegion.usedMagic and region.used != 0) {
+            std.debug.panic("heap panic: invalid usage flag", .{});
+        }
+
+        if (region.used == 0 and region.regionListRef == null) {
+            std.debug.panic("heap panic: invalid region list reference for free region", .{});
+        }
+
+        if (region.used == 0 and region.u2.regionListNext != null and
+            region.u2.regionListNext.?.regionListRef != &region.u2.regionListNext)
+        {
+            std.debug.panic("heap panic: invalid region list linkage", .{});
         }
     }
 };
