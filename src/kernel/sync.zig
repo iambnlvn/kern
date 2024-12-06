@@ -181,14 +181,15 @@ pub const WriterLock = extern struct {
     blockedThreads: LinkedList(Thread),
     state: Volatile(i64),
     const Self = @This();
+    pub const shared = false;
+    pub const exclusive = true;
 
     pub fn take(self: *Self, write: bool) bool {
         return self.takeEx(write, false);
     }
 
-    fn takeEx(self: *Self, write: bool, poll: bool) bool {
+    pub fn takeEx(self: *Self, write: bool, poll: bool) bool {
         var done = false;
-        //This is a placeholder, until arch is implemented
         const maybeCurrThread = arch.getCurrentThread();
 
         if (maybeCurrThread) |thread| {

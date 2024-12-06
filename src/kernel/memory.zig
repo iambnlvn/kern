@@ -148,7 +148,91 @@ pub const AddressSpace = extern struct {
         }
         return region.descriptor.baseAddr;
     }
+
+    pub fn free(space: *AddressSpace, addr: u64, expectedSize: u64, userOnly: bool) callconv(.C) bool {
+        _ = space.reserveMutex.aquire();
+        defer space.reserveMutex.release();
+
+        const region = space.findRegion(addr) orelse return false;
+
+        if (userOnly and !region.flags.contains(.user)) return false;
+        if (!region.data.pin.takeEx(WriterLock.exclusive, true)) return false;
+        if (region.descriptor.baseAddr != addr and !region.flags.contains(.physical)) return false;
+        if (expectedSize != 0 and (expectedSize + pageSize - 1) / pageSize != region.descriptor.pageCount) return false;
+
+        var unmapPages = true;
+
+        if (region.flags.contains(.normal)) {
+            if (!space.decommitRange(region, 0, region.descriptor.pageCount)) {
+                std.debug.panic("Failed to decommit range", .{});
+            }
+            if (region.data.u.normal.commitPageCount != 0) {
+                std.debug.panic("Failed to decommit range", .{});
+            }
+            region.data.u.normal.commit.ranges.free();
+            unmapPages = false;
+        } else if (region.flags.contains(.shared)) {
+            //Todo: implement handle closing for objects
+
+        } else if (region.flags.contains(.file) or region.flags.contains(.physical)) {
+            std.debug.panic("Not implemented", .{});
+        } else if (region.flags.contains(.guard)) return false else std.debug.panic("unsupported region type", .{});
+        return true;
+    }
+
+    pub fn decommitRange(space: *AddressSpace, region: *Region, pageOffset: u64, pageCount: u64) callconv(.C) bool {
+        space.reserveMutex.assertLocked();
+
+        if (region.flags.contains(.notCOmmitTracking)) std.debug.panic("Region does not support commit tracking", .{});
+        if (pageOffset >= region.descriptor.pageCount or pageCount > region.descriptor.pageCount - pageOffset) std.debug.panic("invalid region offset and page count", .{});
+        if (!region.flags.contains(.normal)) std.debug.panic("Cannot decommit from non-normal region", .{});
+
+        var delta: i64 = 0;
+
+        if (!region.data.u.normal.commit.clear(pageOffset, pageOffset + pageCount, &delta, true)) return false;
+
+        if (delta > 0) std.debug.panic("invalid delta calculation", .{});
+        const deltaUnwrapped = @as(u64, @intCast(-delta));
+
+        if (region.data.u.normal.commitPageCount < deltaUnwrapped) std.debug.panic("invalid delta calculation", .{});
+
+        decommit(deltaUnwrapped * pageSize, region.flags.contains(.fixed));
+        space.commitCount -= deltaUnwrapped;
+        region.data.u.normal.commitPageCount -= deltaUnwrapped;
+        //Todo!: implement this in arch
+        // arch.unMapPages(space, region.descriptor.baseAddr + pageOffset * pageSize, pageCount, UnmapPagesFlags.fromFlag(.free), 0, null);
+
+        return true;
+    }
 };
+
+pub fn decommit(byteCount: u64, fixed: bool) callconv(.C) void {
+    if (byteCount & (pageSize - 1) != 0) {
+        std.debug.panic("byte count not page-aligned", .{});
+    }
+
+    const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
+    _ = kernel.physicalMemoryManager.commitMutex.aquire();
+    defer kernel.physicalMemoryManager.commitMutex.release();
+
+    decommitPages(fixed, requiredPageCount);
+}
+
+fn decommitPages(fixed: bool, requiredPageCount: i64) void {
+    if (fixed) {
+        ensureSufficientPages(kernel.physicalMemoryManager.commitFixed, requiredPageCount, "decommitted too many fixed pages");
+        kernel.physicalMemoryManager.commitFixed -= requiredPageCount;
+    } else {
+        ensureSufficientPages(kernel.physicalMemoryManager.commitPageable, requiredPageCount, "decommitted too many pageable pages");
+        kernel.physicalMemoryManager.commitPageable -= requiredPageCount;
+    }
+}
+
+fn ensureSufficientPages(current: i64, required: i64, errorMessage: []const u8) void {
+    if (current < required) {
+        std.debug.panic(errorMessage, .{});
+    }
+}
 
 pub const MapPageFlags = Bitflag(enum(u32) {
     notCacheable = 0,
@@ -161,6 +245,12 @@ pub const MapPageFlags = Bitflag(enum(u32) {
     frameLockAquired = 7,
     writeCombining = 8,
     ignoreIfMapped = 9,
+});
+
+pub const UnmapPagesFlags = Bitflag(enum(u32) {
+    free = 0,
+    freeCopied = 1,
+    balanceFile = 2,
 });
 
 pub const PageFrame = extern struct {
@@ -234,7 +324,7 @@ pub const Physical = extern struct {
         modifiedNoReadNoWriteNoExecutePageCount: u64,
         modifiedNoReadNoExecutePageCount: u64,
         modifiedNoWriteNoExecutePageCount: u64,
-        commitedFixed: i64,
+        commitFixed: i64,
         commitPageable: i64,
         commitFixedLimit: i64,
         commitLimit: i64,

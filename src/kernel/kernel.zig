@@ -1,20 +1,21 @@
 const std = @import("std");
-pub const SpinLock = @import("sync.zig").SpinLock;
+pub const SpinLock = sync.SpinLock;
 pub const scheduling = @import("scheduling.zig");
 const Scheduler = scheduling.Scheduler;
 pub const ds = @import("ds.zig");
 pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
 pub const MAX_WAIT_COUNT = 8;
-pub export var scheduler: Scheduler = undefined;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
-const Heap = memory.Heap;
 
+const Heap = memory.Heap;
+pub export var scheduler: Scheduler = undefined;
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
 pub export var mmCoreRegions: [*]memory.Region = undefined;
 pub export var mmCoreRegionCount: u64 = 0;
 pub export var addrSpace: memory.AddressSpace = undefined;
 pub export var heapCore: Heap = undefined;
+pub export var physicalMemoryManager: memory.Physical.Allocator = undefined;
 
 pub fn Volatile(comptime T: type) type {
     return extern struct {
