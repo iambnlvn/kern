@@ -299,3 +299,56 @@ pub const Physical = extern struct {
         const lowAvailablePageThreshold = 16777216 / pageSize;
     };
 };
+
+pub const HeapRegion = extern struct {
+    u1: extern union {
+        next: u16,
+        size: u16,
+    },
+
+    previous: u16,
+    offset: u16,
+    used: u16,
+
+    u2: extern union {
+        allocationSize: u64,
+        regionListNext: ?*HeapRegion,
+    },
+
+    regionListRef: ?*?*@This(),
+
+    const usedHeaderSize = @sizeOf(HeapRegion) - @sizeOf(?*?*HeapRegion);
+    const freeHeaderSize = @sizeOf(HeapRegion);
+    const usedMagic = 0xabcd;
+
+    fn remove_free(self: *@This()) void {
+        if (self.regionListRef == null or self.used != 0) std.debug.panic("Invalid free region", .{});
+
+        self.regionListRef.?.* = self.u2.regionListNext;
+
+        if (self.u2.regionListNext) |reg| {
+            reg.regionListRef = self.regionListRef;
+        }
+        self.regionListRef = null;
+    }
+
+    fn getHeader(self: *@This()) ?*HeapRegion {
+        return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - usedHeaderSize));
+    }
+
+    fn getData(self: *@This()) u64 {
+        return @intFromPtr(self) + usedHeaderSize;
+    }
+
+    fn getNext(self: *@This()) ?*HeapRegion {
+        return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - self.u1.next));
+    }
+
+    fn getPrev(self: *@This()) ?*HeapRegion {
+        if (self.previous != 0) {
+            return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - self.previous));
+        } else {
+            return null;
+        }
+    }
+};
