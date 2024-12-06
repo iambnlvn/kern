@@ -440,7 +440,7 @@ pub const Heap = extern struct {
             freeRegion.previous = truncatedSize;
             freeRegion.offset = region.offset + truncatedSize;
             freeRegion.used = 0;
-            self.addFree(freeRegion);
+            self.addFreeRegion(freeRegion);
             const nextRegion = freeRegion.getNext().?;
             nextRegion.previous = freeRegion.u1.size;
 
@@ -466,8 +466,22 @@ pub const Heap = extern struct {
         if (self == &kernel.heapCore) {
             return kernel.coreAddressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
         } else {
-            return kernel.addrSpace.alloc(size, Region.Flags.fromFlag(.normal), 0, true);
+            return kernel.addrSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
         }
+    }
+
+    fn addFreeRegion(self: *@This(), region: *HeapRegion) void {
+        if (region.used != 0 or region.u1.size < 32) {
+            std.debug.panic("heap panic", .{});
+        }
+
+        const idx = calcHeapIdx(region.u1.size);
+        region.u2.regionListNext = self.regions[idx];
+        if (region.u2.regionListNext) |regionLN| {
+            regionLN.regionListRef = &region.u2.regionListNext;
+        }
+        self.regions[idx] = region;
+        region.regionListRef = &self.regions[idx];
     }
 
     fn validate(self: *@This()) void {
