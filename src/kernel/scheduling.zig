@@ -391,4 +391,18 @@ export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
 
     kernel.scheduler.dispachSpinLock.release();
 }
-//TODO!: implement AsyncTask
+
+pub const AsyncTask = extern struct {
+    item: ds.List,
+    cb: u64,
+    const Callback = fn (*@This()) void;
+
+    pub fn register(self: *@This(), cb: Callback) void {
+        kernel.scheduler.asyncTaskSpinLock.aquire();
+        if (self.cb == 0) {
+            self.cb = @intFromPtr(cb);
+            arch.getLocalStorage().?.asyncTaskList.insert(&self.item, false);
+        }
+        kernel.scheduler.asyncTaskSpinLock.release();
+    }
+};

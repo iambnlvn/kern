@@ -9,6 +9,7 @@ const WriterLock = kernel.sync.WriterLock;
 const AVLTree = kernel.ds.AVLTree;
 const LinkedList = kernel.ds.LinkedList;
 const Bitflag = kernel.ds.Bitflag;
+const AsyncTask = kernel.scheduling.AsyncTask;
 const List = kernel.ds.List;
 const arch = @import("./arch/x86_64.zig");
 const scheduling = @import("scheduling.zig");
@@ -107,7 +108,7 @@ pub const AddressSpace = extern struct {
     isUser: bool,
     commitCount: u64,
     reserveCount: u64,
-    // removeAsyncTask: AsyncTask, //TODO!: implement AsyncTask
+    removeAsyncTask: AsyncTask,
 
     const Self = @This();
 
@@ -130,6 +131,22 @@ pub const AddressSpace = extern struct {
             if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize <= addr) return null;
             return region;
         }
+    }
+    //TODO: implement the rest of the functions
+    pub fn init(space: *Self) callconv(.C) bool {
+        space.isUser = true;
+    }
+    pub fn alloc(space: *Self, byteCount: u64, flags: Region.Flags, baseAddr: u64, commitAll: bool) callconv(.C) u64 {
+        space.reserveMutex.lock();
+        defer space.reserveMutex.unlock();
+        const region = space.reserve(byteCount, flags.orFlag(.normal), baseAddr) orelse return 0;
+        if (commitAll) {
+            if (!space.commitRange(region, 0, region.descriptor.pageCount)) {
+                space.unreserve(region, false, false);
+                return 0;
+            }
+        }
+        return region.descriptor.baseAddr;
     }
 };
 
@@ -205,7 +222,8 @@ pub const Physical = extern struct {
         firstModifiedNoReadNoWriteNoExecutePage: u64,
         firstModifiedNoReadNoExecutePage: u64,
         firstModifiedNoWriteNoExecutePage: u64,
-        // freeOrZeroedPageBitset: BitSet, //TODO!: implement BitSet
+        freeOrZeroedPageBitset: kernel.ds.BitSet,
+        freePageCount: u64,
         zeroedPageCount: u64,
         standbyPageCount: u64,
         modifiedPageCount: u64,
@@ -242,6 +260,42 @@ pub const Physical = extern struct {
         nextProcToBalance: ?*Process,
         nextRegionToBalance: ?*Region,
         balanceResumePosition: u64,
-        //TODO!: implement allocator methods
+        const Self = @This();
+
+        inline fn getAvailablePageCount(self: Self) u64 {
+            return self.zeroedPageCount + self.freePageCount + self.standbyPageCount;
+        }
+        inline fn getRemainingCommit(self: Self) i64 {
+            return self.commitLimit - self.commitPageable - self.commitedFixed;
+        }
+
+        inline fn shouldTrimObjCache(self: Self) bool {
+            return self.approxTotalObjCacheByteCount / pageSize > self.getObjCacheMaxCachePageCount();
+        }
+
+        inline fn getObjCacheMaxCachePageCount(self: Self) i64 {
+            return @divTrunc(self.commitedFixed - self.commitPageable - @as(i64, @intCast(self.approxTotalObjCacheByteCount)), pageSize);
+        }
+
+        inline fn getNonCacheMemPageCount(self: Self) i64 {
+            return @divTrunc(self.commitedFixed - self.commitPageable - @as(i64, @intCast(self.approxTotalObjCacheByteCount)), pageSize);
+        }
+
+        fn updateAvailablePageCount(self: *Self, increase: bool) void {
+            if (self.getAvailablePageCount() >= criticalAvailablePageThreshold) {
+                _ = self.availableCriticalEvent.set(true);
+                self.availableNormalEvent.reset();
+            } else {
+                self.availableNormalEvent.reset();
+                _ = self.availableCriticalEvent.set(true);
+                if (!increase) {
+                    _ = self.availableLowEvent.set(true);
+                }
+            }
+            if (self.getAvailablePageCount() >= lowAvailablePageThreshold) _ = self.availableLowEvent.reset() else _ = self.availableLowEvent.reset();
+        }
+
+        const criticalAvailablePageThreshold = 1048576 / pageSize;
+        const lowAvailablePageThreshold = 16777216 / pageSize;
     };
 };
