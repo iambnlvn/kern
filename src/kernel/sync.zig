@@ -1,7 +1,9 @@
 const std = @import("std");
 const kernel = @import("kernel.zig");
 const Volatile = kernel.Volatile;
-const Thread = kernel.scheduling.Thread;
+const scheduling = kernel.scheduling;
+const Thread = scheduling.Thread;
+const Timer = scheduling.Timer;
 const arch = kernel.arch;
 const LinkedList = @import("ds.zig").LinkedList;
 const zeroes = kernel.zeroes;
@@ -20,7 +22,7 @@ pub const SpinLock = extern struct {
         const maybeLs = arch.getLocalStorage();
 
         if (maybeLs) |ls| {
-            ls.spinLockCount += 1;
+            ls.spinlockCount += 1;
         }
 
         _ = self.state.compareAndSwapAtom(0, 1);
@@ -28,7 +30,7 @@ pub const SpinLock = extern struct {
         self.interruptsEnabled.writeVolatile(interruptsEnabled);
 
         if (maybeLs) |ls| {
-            self.ownerCpuId.writeVolatile(@as(u8, ls.cpuId));
+            self.ownerCpuId.writeVolatile(@as(u8, ls.processorID));
         }
     }
 
@@ -123,7 +125,7 @@ pub const Event = extern struct {
         if (timeOutInMS == kernel.WAIT_NO_TIMEOUT) {
             return self.waitMultiple(&ev, 1) == 0;
         } else {
-            var timer = zeroes(u8); //TODO!: change this to a Timer struct
+            var timer = zeroes(Timer);
             timer.set(timeOutInMS);
             ev[1] = &timer.event;
             const index = waitMultiple(&ev, 2);
@@ -136,7 +138,6 @@ pub const Event = extern struct {
         const events = evPtr[0..evLen];
         if (events.len == 0) std.debug.panic("No events") else if (events.len > kernel.MAX_WAIT_COUNT) std.debug.panic("Too many events", .{}) else if (!arch.areInterruptsEnabled()) std.debug.panic("Interrupts disabled", .{});
 
-        //Note: the following code is not implemented yet, it is just a placeholder
         const thread = arch.getCurrentThread().?;
         thread.blocking.event.count = events.len;
 

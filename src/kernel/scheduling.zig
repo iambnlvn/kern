@@ -1,13 +1,16 @@
 const std = @import("std");
 const ds = @import("ds.zig");
 const LinkedList = ds.LinkedList;
+const Bitflag = ds.Bitflag;
+const List = ds.List;
 const kernel = @import("kernel.zig");
 const Volatile = kernel.Volatile;
 const SpinLock = kernel.SpinLock;
 const Sync = @import("sync.zig");
 const Event = Sync.Event;
 const Mutex = Sync.Mutex;
-const memory = kernel.memory.AddressSpace;
+const WriterLock = Sync.WriterLock;
+const memory = kernel.memory;
 const arch = @import("./arch/x86_64.zig");
 
 pub const Thread = extern struct {
@@ -47,7 +50,7 @@ pub const Thread = extern struct {
     blocking: extern union {
         mutex: ?*volatile Mutex,
         writer: extern struct {
-            // lock: ?*volatile WriterLock,
+            lock: ?*volatile WriterLock,
             type: bool,
         },
         event: extern struct {
@@ -108,10 +111,10 @@ pub const Node = extern struct {
     dirEntry: u64,
     filesystem: u64,
     id: u64,
-    writerLock: Sync.WriterLock,
+    writerLock: WriterLock,
     nodeError: i64,
     flags: Volatile(u32),
-    cacheItem: kernel.ds.List,
+    cacheItem: List,
 };
 pub const Process = extern struct {
     addrSpace: *memory.AddressSpace,
@@ -149,7 +152,7 @@ pub const Process = extern struct {
         desktop,
     };
 
-    pub const Permission = ds.Bitflag(enum(u32) {
+    pub const Permission = Bitflag(enum(u32) {
         network = 0,
         processCreation = 1,
         processOpen = 2,
@@ -161,7 +164,7 @@ pub const Process = extern struct {
         posixSubSystem = 8,
     });
 
-    pub const CreationFlags = ds.Bitflag(enum(u32) {
+    pub const CreationFlags = Bitflag(enum(u32) {
         paused = 0,
     });
     const ProcCreateData = extern struct {
@@ -236,6 +239,7 @@ pub const Scheduler = extern struct {
     panic: Volatile(bool),
     shutdown: Volatile(bool),
     timeMs: Volatile(u64),
+    activeTimers: LinkedList(Timer),
 
     pub fn notifyObject(
         self: *@This(),
@@ -404,5 +408,64 @@ pub const AsyncTask = extern struct {
             arch.getLocalStorage().?.asyncTaskList.insert(&self.item, false);
         }
         kernel.scheduler.asyncTaskSpinLock.release();
+    }
+};
+
+const Timer = extern struct {
+    event: Event,
+    asyncTask: AsyncTask,
+    node: LinkedList(Timer).Node,
+    triggerInMs: u64,
+    callback: ?AsyncTask.Callback,
+    arg: u64,
+
+    pub fn setEx(self: *@This(), triggerInMS: u64, maybeCb: ?AsyncTask.Callback, maybeArg: u64) void {
+        kernel.scheduler.activeTimersSpinLock.aquire();
+
+        removeFromActiveTimersIfNeeded(self);
+
+        self.event.reset();
+        self.triggerInMs = triggerInMS + kernel.scheduler.timeMs.readVolatile();
+        self.callback = @intFromPtr(maybeCb);
+        self.arg = maybeArg;
+        self.node.value = self;
+
+        insertTimerInCorrectPosition(self);
+
+        kernel.scheduler.activeTimersSpinLock.release();
+    }
+
+    fn removeFromActiveTimersIfNeeded(self: *@This()) void {
+        if (self.node.list != null) {
+            kernel.scheduler.activeTimers.remove(&self.node);
+        }
+    }
+
+    fn insertTimerInCorrectPosition(self: *@This()) void {
+        var maybeTimer = kernel.scheduler.activeTimers.first;
+        while (maybeTimer != null) {
+            const timer = maybeTimer.?.value.?;
+            const next = maybeTimer.?.next;
+            if (timer.triggerInMs > self.triggerInMs) break;
+
+            maybeTimer = next;
+        }
+
+        if (maybeTimer) |timer| {
+            kernel.scheduler.activeTimers.prepend(&self.node, timer);
+        } else {
+            kernel.scheduler.activeTimers.append(&self.node);
+        }
+    }
+
+    pub fn set(self: *@This(), triggerInMS: u64) void {
+        self.setEx(triggerInMS, null, 0);
+    }
+
+    pub fn remove(self: *@This()) void {
+        kernel.scheduler.activeTimersSpinLock.aquire();
+        if (self.callback != null) std.debug.panic("timer with callback cannot be removed", .{});
+        if (self.node.list != null) kernel.scheduler.activeTimers.remove(&self.node);
+        kernel.scheduler.activeTimersSpinLock.release();
     }
 };

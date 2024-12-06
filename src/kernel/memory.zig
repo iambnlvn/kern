@@ -98,7 +98,7 @@ pub const HandlePageFaultFlags = Bitflag(enum(u32) {
 });
 
 pub const AddressSpace = extern struct {
-    arch: AddressSpace.Arch,
+    arch: arch.AddressSpace,
     freeRegionBase: AVLTree(Region),
     freeRegionSize: AVLTree(Region),
     freeRegionsNonGuard: LinkedList(Region),
@@ -567,8 +567,7 @@ pub const Heap = extern struct {
             return addressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
         } else {
             if (region == null) std.debug.panic("Invalid region", .{});
-            //Todo!: implement free
-            // _ = addressSpace.free(@intFromPtr(region.?), 0, false);
+            _ = addressSpace.free(@intFromPtr(region.?), 0, false);
             return 0;
         }
     }
@@ -667,6 +666,105 @@ pub const Heap = extern struct {
         self.validate();
         self.mutex.release();
     }
+
+    //Todo?: should I keep this version
+    // fn free(self: *Self, addr: u64, expectedSize: u64) void {
+    //     if (addr == 0 and expectedSize != 0) std.debug.panic("Invalid free", .{});
+    //     if (addr == 0) return;
+
+    //     var region = @as(*HeapRegion, @ptrFromInt(addr)).getHeader().?;
+    //     validateRegionHeader(region, expectedSize);
+
+    //     if (region.u1.size == 0) {
+    //         self.handleFreeZeroSizeRegion(region);
+    //         return;
+    //     }
+
+    //     const firstRegion = getFirstRegion(region);
+    //     self.validateHeap(firstRegion);
+
+    //     _ = self.mutex.aquire();
+    //     self.validate();
+
+    //     region.used = 0;
+
+    //     handleRegionOffsets(region);
+
+    //     self.allocationCount.decrement();
+    //     _ = self.size.atomicFetchSub(region.u1.size);
+
+    //     mergeAdjacentFreeRegions(region);
+    //     self.handleFullRegion(region);
+    //     self.mutex.release();
+    // }
+
+    // fn validateRegionHeader(region: *HeapRegion, expectedSize: u64) void {
+    //     if (region.used != HeapRegion.usedMagic) std.debug.panic("Invalid free", .{});
+    //     if (expectedSize != 0 and region.u2.allocationSize != expectedSize) std.debug.panic("Invalid free", .{});
+    // }
+
+    // fn handleFreeZeroSizeRegion(self: *Self, region: *HeapRegion) void {
+    //     _ = self.size.atomicFetchSub(region.u2.allocationSize);
+    //     self.freeCall(region);
+    // }
+
+    // fn getFirstRegion(region: *HeapRegion) *HeapRegion {
+    //     return @as(*HeapRegion, @ptrFromInt(@intFromPtr(region) - region.offset + 65536 - 32));
+    // }
+
+    // fn validateHeap(self: Self, firstRegion: *HeapRegion) void {
+    //     if (@as(**Heap, @ptrFromInt(firstRegion.getData())).* != self) {
+    //         std.debug.panic("Heap mismatch: the first region's data does not point to the expected heap", .{});
+    //     }
+    // }
+
+    // fn handleRegionOffsets(region: *HeapRegion) void {
+    //     if (region.offset < region.previous) std.debug.panic("Region offset is less than the previous region offset", .{});
+    // }
+
+    // fn mergeAdjacentFreeRegions(region: *HeapRegion) void {
+    //     if (region.getNext()) |nextRegion| {
+    //         if (nextRegion.used == 0) {
+    //             region.removeFree();
+    //             region.u1.size += nextRegion.u1.size;
+    //             nextRegion.getNext().?.previous = region.u1.size;
+    //         }
+    //     }
+
+    //     if (region.getPrev()) |prevRegion| {
+    //         if (prevRegion.used == 0) {
+    //             prevRegion.removeFree();
+    //             prevRegion.u1.size += region.u1.size;
+    //             region.getNext().?.previous = prevRegion.u1.size;
+    //             region = prevRegion;
+    //         }
+    //     }
+    // }
+
+    // fn handleFullRegion(self: *Self, region: *HeapRegion) void {
+    //     if (region.u1.size == 65536 - 32) {
+    //         if (region.offset != 0) std.debug.panic("Invalid region offset", .{});
+    //         self.blockCount.decrement();
+
+    //         if (self.canValidate) {
+    //             var found = false;
+
+    //             for (self.blocks[0 .. self.blockCount.readVolatile() + 1]) |*heapRegion| {
+    //                 if (heapRegion.* == region) {
+    //                     heapRegion.* = self.blocks[self.blockCount.readVolatile()];
+    //                     found = true;
+    //                     break;
+    //                 } else {
+    //                     std.debug.panic("Invalid block", .{});
+    //                 }
+    //             }
+    //         }
+    //         self.freeCall(region);
+    //     } else {
+    //         self.addFreeRegion(region);
+    //         self.validate();
+    //     }
+    // }
 
     fn validate(self: *@This()) void {
         if (!self.canValidate) return;
