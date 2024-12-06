@@ -462,12 +462,33 @@ pub const Heap = extern struct {
         return addr;
     }
 
-    fn allocCall(self: *Self, size: u64) u64 {
-        if (self == &kernel.heapCore) {
-            return kernel.coreAddressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
+    fn callAddressSpace(
+        self: *Self,
+        size: u64,
+        isAlloc: bool,
+        region: ?*HeapRegion, // `null` for allocation, non-null for freeing
+    ) u64 {
+        const addressSpace = if (self == &kernel.heapCore)
+            &kernel.coreAddressSpace
+        else
+            &kernel.addrSpace;
+
+        if (isAlloc) {
+            return addressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
         } else {
-            return kernel.addrSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
+            if (region == null) std.debug.panic("Invalid region", .{});
+            //Todo!: implement free
+            // _ = addressSpace.free(@intFromPtr(region.?), 0, false);
+            return 0;
         }
+    }
+
+    fn allocCall(self: *Self, size: u64) u64 {
+        return self.callAddressSpace(size, true, null);
+    }
+
+    fn freeCall(self: *Self, region: *HeapRegion) void {
+        _ = self.callAddressSpace(0, false, region);
     }
 
     fn addFreeRegion(self: *@This(), region: *HeapRegion) void {
@@ -482,6 +503,79 @@ pub const Heap = extern struct {
         }
         self.regions[idx] = region;
         region.regionListRef = &self.regions[idx];
+    }
+
+    fn free(self: *Self, addr: u64, expectedSize: u64) void {
+        if (addr == 0 and expectedSize != 0) std.debug.panic("Invalid free", .{});
+        if (addr == 0) return;
+
+        var region = @as(*HeapRegion, @ptrFromInt(addr)).getHeader().?;
+
+        if (region.used != HeapRegion.usedMagic) std.debug.panic("Invalid free", .{});
+        if (expectedSize != 0 and region.u2.allocationSize != expectedSize) std.debug.panic("Invalid free", .{});
+
+        if (region.u1.size == 0) {
+            _ = self.size.atomicFetchSub(region.u2.allocationSize);
+            self.freeCall(region);
+            return;
+        }
+
+        const firstRegion = @as(*HeapRegion, @ptrFromInt(@intFromPtr(region) - region.offset + 65536 - 32));
+        if (@as(**Heap, @ptrFromInt(firstRegion.getData())).* != self) {
+            std.debug.panic("Heap mismatch: the first region's data does not point to the expected heap", .{});
+        }
+
+        _ = self.mutex.aquire();
+        self.validate();
+
+        region.used = 0;
+        if (region.offset < region.previous) std.debug.panic("Region offset is less than the previous region offset", .{});
+
+        self.allocationCount.decrement();
+        _ = self.size.atomicFetchSub(region.u1.size);
+
+        if (region.getNext()) |nextRegion| {
+            if (nextRegion.used == 0) {
+                region.removeFree();
+                region.u1.size += nextRegion.u1.size;
+                nextRegion.getNext().?.previous = region.u1.size;
+            }
+        }
+
+        if (region.getPrev()) |prevRegion| {
+            if (prevRegion.used == 0) {
+                prevRegion.removeFree();
+                prevRegion.u1.size += region.u1.size;
+                region.getNext().?.previous = prevRegion.u1.size;
+                region = prevRegion;
+            }
+        }
+
+        if (region.u1.size == 65536 - 32) {
+            if (region.offset != 0) std.debug.panic("Invalid region offset", .{});
+            self.blockCount.decrement();
+
+            if (self.canValidate) {
+                var found = false;
+
+                for (self.blocks[0 .. self.blockCount.readVolatile() + 1]) |*heapRegion| {
+                    if (heapRegion.* == region) {
+                        heapRegion.* = self.blocks[self.blockCount.readVolatile()];
+                        found = true;
+                        break;
+                    } else {
+                        std.debug.panic("Invalid block", .{});
+                    }
+                }
+            }
+            self.freeCall(region);
+            self.mutex.release();
+            return;
+        }
+
+        self.addFreeRegion(region);
+        self.validate();
+        self.mutex.release();
     }
 
     fn validate(self: *@This()) void {
