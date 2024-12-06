@@ -352,3 +352,168 @@ pub const HeapRegion = extern struct {
         }
     }
 };
+
+fn calcHeapIdx(size: u64) u64 {
+    return @bitSizeOf(u32) - @clz(@as(u32, @truncate(size))) - 5;
+}
+
+pub const Heap = extern struct {
+    mutex: Mutex,
+    regions: [12]?*HeapRegion,
+    allocationCount: Volatile(u64),
+    size: Volatile(u64),
+    blockCount: Volatile(u64),
+    blocks: [16]?*HeapRegion,
+    canValidate: bool,
+    const largeAllocationThreshold = 32768;
+
+    const Self = @This();
+
+    pub fn alloc(self: *Self, askedSize: u64, isZero: bool) u64 {
+        if (askedSize == 0) return 0;
+        if (@as(i64, @bitCast(askedSize)) < 0) std.debug.panic("Invalid size", .{});
+
+        const size = (askedSize + HeapRegion.usedHeaderSize + 0x1F) & ~@as(u64, 0x1F);
+
+        if (size >= largeAllocationThreshold) {
+            if (@as(?*HeapRegion, @ptrFromInt(self.allocCall(size)))) |region| {
+                region.used = HeapRegion.usedMagic;
+                region.u1.size = 0;
+                region.u2.allocationSize = askedSize;
+                _ = self.size.atomicFetchAdd(askedSize);
+                return region.getData();
+            } else {
+                return 0;
+            }
+        }
+        _ = self.mutex.aquire();
+        self.validate();
+
+        const region = regionBlk: {
+            const heapIdx = calcHeapIdx(size);
+            if (heapIdx < self.regions.len) {
+                for (self.regions[heapIdx..]) |maybeRegion| {
+                    if (maybeRegion) |heapRegion| {
+                        if (heapRegion.u1.size >= size) {
+                            const result = heapRegion;
+                            result.removeFree();
+                            break :regionBlk result;
+                        }
+                    }
+                }
+            }
+
+            const allocation = @as(?*HeapRegion, @intFromPtr(self.allocCall(size)));
+            if (self.blockCount.readVolatile() < 16) {
+                self.blocks[self.blockCount.readVolatile()] = allocation;
+            } else {
+                self.canValidate = false;
+            }
+
+            self.blockCount.increment();
+            if (allocation) |result| {
+                result.u1.size = 65536 - 32;
+                const endRegion = result.getNext().?;
+                endRegion.used = HeapRegion.usedMagic;
+                endRegion.offset = 65536 - 32;
+                endRegion.u1.next = 32;
+                @as(?*?*Heap, @ptrFromInt(endRegion.getData())).?.* = self;
+                break :regionBlk result;
+            } else {
+                self.mutex.release();
+                return 0;
+            }
+        };
+
+        if (region.used != 0 or region.u1.size < size) std.debug.panic("Invalid region", .{});
+        self.allocationCount.increment();
+        _ = self.size.atomicFetchAdd(size);
+
+        if (region.u1.size != size) {
+            const oldSize = region.u1.size;
+            const truncatedSize = @as(u16, @intCast(size));
+            region.u1.size = truncatedSize;
+            region.used = HeapRegion.usedMagic;
+
+            const freeRegion = region.getNext().?;
+            freeRegion.u1.size = oldSize - truncatedSize;
+            freeRegion.previous = truncatedSize;
+            freeRegion.offset = region.offset + truncatedSize;
+            freeRegion.used = 0;
+            self.addFree(freeRegion);
+            const nextRegion = freeRegion.getNext().?;
+            nextRegion.previous = freeRegion.u1.size;
+
+            self.validate();
+        }
+
+        region.used = HeapRegion.usedMagic;
+        region.u2.allocationSize = askedSize;
+        self.mutex.release();
+
+        const addr = region.getData();
+        const mem = @as([*]u8, @ptrFromInt(addr[0..askedSize]));
+
+        if (isZero) {
+            @memset(mem, 0);
+        } else {
+            @memset(mem, 0xa1);
+        }
+        return addr;
+    }
+
+    fn allocCall(self: *Self, size: u64) u64 {
+        if (self == &kernel.heapCore) {
+            return kernel.coreAddressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
+        } else {
+            return kernel.addrSpace.alloc(size, Region.Flags.fromFlag(.normal), 0, true);
+        }
+    }
+
+    fn validate(self: *@This()) void {
+        if (!self.canValidate) return;
+
+        for (self.blocks[0..self.blockCount.readVolatile()], 0..) |maybeStart, i| {
+            if (maybeStart) |start| {
+                const end = @intFromPtr(@as(*HeapRegion, @ptrFromInt(self.blocks[i])) + 65536);
+                var maybePrev: ?*HeapRegion = null;
+                var region = start;
+
+                while (@intFromPtr(region) < @intFromPtr(end)) {
+                    if (maybePrev) |previous| {
+                        if (@intFromPtr(previous) != @intFromPtr(region.getPrev())) {
+                            std.debug.panic("heap panic", .{});
+                        }
+                    } else {
+                        if (region.previous != 0) std.debug.panic("heap panic", .{});
+                    }
+
+                    if (region.u1.size & 31 != 0) std.debug.panic("heap panic", .{});
+
+                    if (@intFromPtr(region) - @intFromPtr(start) != region.offset) {
+                        std.debug.panic("heap panic", .{});
+                    }
+
+                    if (region.used != HeapRegion.usedMagic and region.used != 0) {
+                        std.debug.panic("Heap panic", .{});
+                    }
+
+                    if (region.used == 0 and region.regionListRef == null) {
+                        std.debug.panic("heap panic", .{});
+                    }
+
+                    if (region.used == 0 and region.u2.regionListNext != null and region.u2.regionListNext.?.regionListRef != &region.u2.regionListNext) {
+                        std.debug.panic("heap panic", .{});
+                    }
+
+                    maybePrev = region;
+                    region = region.getNext().?;
+                }
+
+                if (region != end) {
+                    std.debug.panic("heap panic", .{});
+                }
+            }
+        }
+    }
+};

@@ -8,11 +8,13 @@ pub const MAX_WAIT_COUNT = 8;
 pub export var scheduler: Scheduler = undefined;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
+const Heap = memory.Heap;
 
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
 pub export var mmCoreRegions: [*]memory.Region = undefined;
 pub export var mmCoreRegionCount: u64 = 0;
 pub export var addrSpace: memory.AddressSpace = undefined;
+pub export var heapCore: Heap = undefined;
 
 pub fn Volatile(comptime T: type) type {
     return extern struct {
@@ -39,6 +41,13 @@ pub fn Volatile(comptime T: type) type {
 
         pub inline fn compareAndSwapAtom(self: *@This(), expectedValue: T, newVal: T) ?T {
             return @cmpxchgStrong(@TypeOf(self.value), &self.value, expectedValue, newVal, .SeqCst, .SeqCst);
+        }
+
+        pub inline fn atomicFetchAdd(self: *@This(), value: T) T {
+            return @atomicRmw(T, &self.value, .Add, value, .SeqCst);
+        }
+        pub inline fn atomicFetchSub(self: *@This(), value: T) T {
+            return @atomicRmw(T, &self.value, .Sub, value, .SeqCst);
         }
     };
 }
