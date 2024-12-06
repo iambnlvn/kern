@@ -321,7 +321,7 @@ pub const HeapRegion = extern struct {
     const freeHeaderSize = @sizeOf(HeapRegion);
     const usedMagic = 0xabcd;
 
-    fn remove_free(self: *@This()) void {
+    fn removeFree(self: *@This()) void {
         if (self.regionListRef == null or self.used != 0) std.debug.panic("Invalid free region", .{});
 
         self.regionListRef.?.* = self.u2.regionListNext;
@@ -333,7 +333,7 @@ pub const HeapRegion = extern struct {
     }
 
     fn getHeader(self: *@This()) ?*HeapRegion {
-        return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - usedHeaderSize));
+        return @as(?*HeapRegion, @ptrFromInt(@intFromPtr(self) - usedHeaderSize));
     }
 
     fn getData(self: *@This()) u64 {
@@ -341,12 +341,12 @@ pub const HeapRegion = extern struct {
     }
 
     fn getNext(self: *@This()) ?*HeapRegion {
-        return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - self.u1.next));
+        return @as(?*HeapRegion, @ptrFromInt(@intFromPtr(self) - self.u1.next));
     }
 
     fn getPrev(self: *@This()) ?*HeapRegion {
         if (self.previous != 0) {
-            return @ptrFromInt(@as(?*HeapRegion, @intFromPtr(self) - self.previous));
+            return @as(?*HeapRegion, @ptrFromInt(@intFromPtr(self) - self.previous));
         } else {
             return null;
         }
