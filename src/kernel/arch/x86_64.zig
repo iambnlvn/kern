@@ -16,6 +16,8 @@ pub const coreAddrSpaceStart = 0xFFFF800100000000;
 pub const coreAddrSpaceSize = 0xFFFF8001F0000000 - 0xFFFF800100000000;
 pub const modulesStart = 0xFFFFFFFF90000000;
 pub const modulesSize = 0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
+pub const entryPerPageTableBitCount = 9;
+const pageBitCount = 0xc;
 
 pub fn initThread(
     kernelStack: u64,
@@ -114,6 +116,9 @@ pub extern fn enableInterrupts() callconv(.C) void;
 pub extern fn debugOutByte(byte: u8) callconv(.C) void;
 pub extern fn disableInterrupts() callconv(.C) void;
 pub extern fn fakeTimerInterrupt() callconv(.C) void;
+pub extern fn invalidatePage(page: u64) callconv(.C) void;
+pub extern fn ProcessorReadCR3() callconv(.C) u64;
+pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
 
 const LocalStorage = extern struct {
@@ -314,15 +319,15 @@ pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlag
     const faultInVeryLowMem = va < pageSize;
     if (!faultInVeryLowMem) {
         if (va >= lowMemMapStart and va < lowMemMapStart + lowMemLimit and forSupervisor) {
-            const physicalAddr = va - lowMemMapStart;
+            const askedPhysicalAddr = va - lowMemMapStart;
             const mapPageFlags = memory.MapPageFlags.fromFlag(.commitTablesNow);
-            _ = mapPage(&kernel.addrSpace, physicalAddr, va, mapPageFlags);
+            _ = mapPage(&kernel.addrSpace, askedPhysicalAddr, va, mapPageFlags);
             return true;
         } else if (va >= coreMemStartRegion and va < coreMemStartRegion + coreMemRegionCount * @sizeOf(memory.Region) and forSupervisor) {
             const physicalAllocationFlags = memory.Physical.Flags.fromFlag(.zeroed);
-            const physicalAddr = memory.physicalAllocWithFlags(physicalAllocationFlags);
+            const askedPhysicalAddr = memory.physicalAllocWithFlags(physicalAllocationFlags);
             const mapPageFlags = memory.MapPageFlags.fromFlag(.commitTablesNow);
-            _ = mapPage(&kernel.addrSpace, physicalAddr, va, mapPageFlags);
+            _ = mapPage(&kernel.addrSpace, askedPhysicalAddr, va, mapPageFlags);
             return true;
         } else if (va >= coreAddrSpaceStart and va < coreAddrSpaceStart + coreAddrSpaceSize and forSupervisor) {
             return kernel.coreAddrSpace.handlePageFault(va, flags);
@@ -350,11 +355,146 @@ export fn MMArchIsBufferInUserRange(baseAddr: u64, byteCount: u64) callconv(.C) 
     return true;
 }
 
-pub export fn mapPage(space: *memory.AddressSpace, physicalAddr: u64, va: u64, flags: memory.MapPageFlags) callconv(.C) bool {
-    _ = space;
-    _ = flags;
-    if ((va | physicalAddr) & (pageSize - 1) != 0) {
+pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u64, flags: memory.MapPageFlags) callconv(.C) bool {
+    if ((va | askedPhysicalAddr) & (pageSize - 1) != 0) {
         std.debug.panic("Pages are not aligned", .{});
     }
-    //TODO: figure it out
+
+    if (kernel.physicalMemoryManager.pageFrameDBCount != 0 and (askedPhysicalAddr >> pageBitCount < kernel.physicalMemoryManager.pageFrameDBCount)) {
+        const frameState = kernel.physicalMemoryManager.pageFrames[askedPhysicalAddr >> pageBitCount].state.readVolatile();
+
+        if (frameState != .active and frameState != .unusable) {
+            std.debug.panic("Page frame is not active nor unusable", .{});
+        }
+    }
+
+    if (askedPhysicalAddr == 0) std.debug.panic("Physical address is null", .{});
+    if (va == 0) std.debug.panic("Virtual address is null", .{});
+
+    if (askedPhysicalAddr < 0xFFFF800000000000 and ProcessorReadCR3() != space.arch.cr3) {
+        std.debug.panic("Mapping physical address in wrong address space", .{});
+    }
+
+    const aquireFrameLock = !flags.contains(.noNewTables) and !flags.contains(.frameLockAquired);
+    if (aquireFrameLock) _ = kernel.physicalMemoryManager.pageFrameMutex.acquire();
+    defer if (aquireFrameLock) kernel.physicalMemoryManager.pageFrameMutex.release();
+
+    const aquireSpaceLock = !flags.contains(.noNewTables);
+
+    if (aquireSpaceLock) {
+        space.arch.mutex.aquire();
+    }
+
+    defer if (aquireSpaceLock) space.arch.mutex.release();
+
+    const physicalAddress = askedPhysicalAddr & 0xFFFFFFFFFFFFF000;
+    const virtualAddress = va & 0x0000FFFFFFFFF000;
+
+    const indices = PageTables.computeIndices(virtualAddress);
+
+    if (space != &kernel.coreAddressSpace and space != &kernel.addrSpace) {
+        const L4Index = indices[@intFromEnum(PageTables.Level.level4)];
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L4Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L3 page table\n");
+
+        const L3Index = indices[@intFromEnum(PageTables.Level.level3)];
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L3Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L2 page table\n");
+
+        const L2Index = indices[@intFromEnum(PageTables.Level.level2)];
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L2Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L1 page table\n");
+    }
+
+    handleMissingPageTable(space, .level4, indices, flags);
+    handleMissingPageTable(space, .level3, indices, flags);
+    handleMissingPageTable(space, .level2, indices, flags);
+
+    const oldValue = PageTables.access(.level1, indices).*;
+    var value = physicalAddress | 0b11;
+
+    if (flags.contains(.writeCombining)) value |= 16;
+    if (flags.contains(.notCacheable)) value |= 24;
+    if (flags.contains(.user)) value |= 7 else value |= 1 << 8;
+    if (flags.contains(.readOnly)) value &= ~@as(u64, 2);
+    if (flags.contains(.copied)) value |= 1 << 9;
+
+    value |= (1 << 5);
+    value |= (1 << 6);
+
+    if (oldValue & 1 != 0 and !flags.contains(.overwrite)) {
+        if (flags.contains(.ignoreIfMapped)) {
+            return false;
+        }
+
+        if (oldValue & ~@as(u64, pageSize - 1) != physicalAddress) {
+            std.debug.panic("attempt to map page tha has already been mapped", .{});
+        }
+
+        if (oldValue == value) {
+            std.debug.panic("attempt to rewrite page translation", .{});
+        } else {
+            const writable = oldValue & 2 == 0 and value & 2 != 0;
+            if (!writable) {
+                std.debug.panic("attempt to change flags mapping address", .{});
+            }
+        }
+    }
+
+    PageTables.access(.level1, indices).* = value;
+
+    invalidatePage(va);
+
+    return true;
 }
+
+inline fn handleMissingPageTable(
+    space: *memory.AddressSpace,
+    comptime level: PageTables.Level,
+    indices: PageTables.Indices,
+    flags: memory.MapPageFlags,
+) void {
+    if (PageTables.access(level, indices).* & 1 == 0) {
+        if (flags.contains(.noNewTables)) std.debug.panic("no new tables flag set but a table was missing", .{});
+
+        const physicalAllocationFlags = memory.Physical.Flags.fromFlag(.lockAquired);
+        const physicalAllocation = memory.physical_allocate_with_flags(physicalAllocationFlags) | 0b111;
+        PageTables.access(level, indices).* = physicalAllocation;
+        const prevLevel = comptime @as(PageTables.Level, @enumFromInt(@intFromEnum(level) - 1));
+
+        const page = @intFromPtr(PageTables.access_at_index(prevLevel, indices[@intFromEnum(prevLevel)]));
+        invalidatePage(page);
+        const pageSlice = @as([*]u8, @ptrFromInt(page & ~@as(u64, pageSize - 1)))[0..pageSize];
+        @memset(pageSlice, 0);
+        space.arch.activePageTableCount += 1;
+    }
+}
+const PageTables = extern struct {
+    const Level = enum(u8) {
+        level1 = 0,
+        level2 = 1,
+        level3 = 2,
+        level4 = 3,
+
+        const count = std.enums.values(PageTables.Level).len;
+    };
+
+    fn access(comptime level: Level, indices: Indices) *volatile u64 {
+        return accessAt(level, indices[@intFromEnum(level)]);
+    }
+
+    fn accessAt(comptime level: Level, index: u64) *volatile u64 {
+        return switch (level) {
+            .level1 => @as(*volatile u64, @ptrFromInt(0xFFFFFF0000000000 + index * @sizeOf(u64))),
+            .level2 => @as(*volatile u64, @ptrFromInt(0xFFFFFF7F80000000 + index * @sizeOf(u64))),
+            .level3 => @as(*volatile u64, @ptrFromInt(0xFFFFFF7FBFC00000 + index * @sizeOf(u64))),
+            .level4 => @as(*volatile u64, @ptrFromInt(0xFFFFFF7FBFDFE000 + index * @sizeOf(u64))),
+        };
+    }
+    const Indices = [PageTables.Level.count]u64;
+
+    inline fn computeIndices(va: u64) Indices {
+        var indices: Indices = undefined;
+        inline for (comptime std.enums.values(PageTables.Level)) |value| {
+            indices[@intFromEnum(value)] = va >> (pageBitCount + entryPerPageTableBitCount * @intFromEnum(value));
+        }
+        return indices;
+    }
+};
