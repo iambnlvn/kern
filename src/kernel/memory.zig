@@ -16,7 +16,7 @@ const scheduling = @import("scheduling.zig");
 const Process = scheduling.Process;
 const Thread = scheduling.Thread;
 const pageSize = arch.pageSize;
-
+const pageBitCount = arch.pageBitCount;
 pub const SharedRegion = extern struct {
     size: u64,
     handleCount: Volatile(u64),
@@ -330,7 +330,7 @@ pub const Physical = extern struct {
         commitLimit: i64,
         commitMutex: Mutex,
         pageFrameMutex: Mutex,
-
+        lastStandbyPage: u64,
         manipulationLock: Mutex,
         manipulationProcLock: SpinLock,
         manipulationRegion: ?*Region,
@@ -388,6 +388,14 @@ pub const Physical = extern struct {
         const criticalAvailablePageThreshold = 1048576 / pageSize;
         const lowAvailablePageThreshold = 16777216 / pageSize;
     };
+    pub const Flags = Bitflag(enum(u32) {
+        canFail = 0,
+        commitNow = 1,
+        zeroed = 2,
+        lockAquired = 3,
+    });
+
+    pub const memoryManipulationRegionPageCount = 0x10;
 };
 
 pub const HeapRegion = extern struct {
@@ -824,3 +832,36 @@ pub const Heap = extern struct {
         }
     }
 };
+
+export fn PMZero(askedPagePtr: [*]u64, askedPageCount: u64, isContiguous: bool) callconv(.C) void {
+    _ = kernel.physicalMemoryManager.manipulationLock.aquire();
+
+    var pageCount = askedPageCount;
+    var pages = askedPagePtr;
+
+    while (true) {
+        const pagesToProcess = if (pageCount > Physical.memoryManipulationRegionPageCount) Physical.memoryManipulationRegionPageCount else pageCount;
+        pageCount -= pagesToProcess;
+
+        const region = @intFromPtr(kernel.physicalMemoryManager.manipulationRegion);
+        var i: u64 = 0;
+        while (i < pagesToProcess) : (i += 1) {
+            _ = arch.mapPage(&kernel.coreAddressSpace, if (isContiguous) pages[0] + (i << pageBitCount) else pages[i], region + pageSize * i, MapPageFlags.fromFlags(.{ .overwrite, .noNewTables }));
+        }
+
+        kernel.physicalMemoryManager.manipulationProcLock.aquire();
+
+        i = 0;
+        while (i < pagesToProcess) : (i += 1) {
+            arch.invalidatePage(region + i * pageSize);
+        }
+        kernel.EsMemoryZero(region, pagesToProcess * pageSize);
+        kernel.physicalMemoryManager.manipulationProcLock.release();
+
+        if (pageCount != 0) {
+            if (!isContiguous) pages = @as([*]u64, @ptrFromInt(@intFromPtr(pages) + Physical.memoryManipulationRegionPageCount));
+        } else break;
+    }
+
+    kernel.physicalMemoryManager.manipulationLock.release();
+}

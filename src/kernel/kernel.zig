@@ -92,3 +92,10 @@ pub const FatalError = enum(u32) {
     recursiveBatch,
     unknownSyscall,
 };
+
+pub export fn EsMemoryZero(dst: u64, byteCount: u64) callconv(.C) void{
+ if (byteCount == 0) return;
+const slice = @as([*]u8,@ptrFromInt(dst))[0..byteCount];
+@memset(slice, 0);
+
+}
