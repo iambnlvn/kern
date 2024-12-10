@@ -865,3 +865,90 @@ export fn PMZero(askedPagePtr: [*]u64, askedPageCount: u64, isContiguous: bool) 
 
     kernel.physicalMemoryManager.manipulationLock.release();
 }
+
+pub fn physicalAllocFlagged(flags: Physical.Flags) u64 {
+    return physicalAlloc(flags, 1, 1, 0);
+}
+
+export var earlyZeroBuffer: [pageSize]u8 align(pageSize) = undefined;
+
+export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64 {
+    const mutexAlreadyAquired = flags.contains(.lockAquired);
+    if (!mutexAlreadyAquired) _ = kernel.physicalMemoryManager.pageFrameMutex.aquire() else kernel.physicalMemoryManager.pageFrameMutex.assertLocked();
+    defer if (!mutexAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.release();
+
+    var commitNow = @as(i64, @intCast(count * pageSize));
+
+    if (flags.contains(.commitNow)) {
+        //Todo!: implement this
+        // if (!commit(@as(u64,@intCast(commitNow)), true)) return 0;
+    } else commitNow = 0;
+
+    const simple = count == 1 and alignment == 1 and below == 0;
+
+    if (!kernel.physicalMemoryManager.pageFrameDBInitialized) {
+        if (!simple) std.debug.panic("non-simple allocation before initialization of the pageframe database", .{});
+        const page = arch.EarlyAllocPage();
+        if (flags.contains(.zeroed)) {
+            _ = arch.mapPage(&kernel.coreAddressSpace, page, @intFromPtr(&earlyZeroBuffer), MapPageFlags.fromFlags(.{ .overwrite, .noNewTables, .frameLockAquired }));
+            earlyZeroBuffer = kernel.zeroes(@TypeOf(earlyZeroBuffer));
+        }
+
+        return page;
+    } else if (!simple) {
+        const pages = kernel.physicalMemoryManager.freeOrZeroedPageBitset.get(count, alignment, below);
+        if (pages != std.math.maxInt(u64)) {
+            //TODO!: implement this
+            // MMPhysicalActivatePages(pages, count);
+            var address = pages << pageBitCount;
+            if (flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), count, true); //todo!: implement PMZero
+            return address;
+        }
+        // else error
+    } else {
+        var notZeroed = false;
+        var page = kernel.physicalMemoryManager.firstZeroedPage;
+
+        if (page == 0) {
+            page = kernel.physicalMemoryManager.firstFreePage;
+            notZeroed = true;
+        }
+
+        if (page == 0) {
+            page = kernel.physicalMemoryManager.lastStandbyPage;
+            notZeroed = true;
+        }
+
+        if (page != 0) {
+            const frame = &kernel.physicalMemoryManager.pageFrames[page];
+
+            switch (frame.state.readVolatile()) {
+                .active => std.debug.panic("corrupt page frame database", .{}),
+                .standby => {
+                    if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
+                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                    }
+
+                    frame.cacheRef.?.* = 0;
+                },
+                else => {
+                    kernel.physicalMemoryManager.freeOrZeroedPageBitset.take(page); // todo!: implement take in bitset
+                },
+            }
+
+            // MMPhysicalActivatePages(page, 1);
+
+            var address = page << pageBitCount;
+            if (notZeroed and flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), 1, false);
+
+            return address;
+        }
+    }
+
+    if (!flags.contains(.canFail)) {
+        std.debug.panic("out of memory", .{});
+    }
+
+    decommit(@as(u64, @intCast(commitNow)), true);
+    return 0;
+}
