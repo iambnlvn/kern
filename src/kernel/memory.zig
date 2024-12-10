@@ -963,7 +963,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
                     _ = kernel.physicalMemoryManager.freePageCount.atomicSub(1, .SeqCst);
                 },
                 else => {
-                    kernel.physicalMemoryManager.freeOrZeroedPageBitset.take(page); // todo!: implement take in bitset
+                    kernel.physicalMemoryManager.freeOrZeroedPageBitset.take(page);
                 },
             }
 

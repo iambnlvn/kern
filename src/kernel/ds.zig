@@ -1,6 +1,9 @@
 const std = @import("std");
 const panic = std.debug.panic; //TODO!: this should be replaced with a kernel panic once implemented
 const zeroes = @import("kernel.zig").zeroes;
+const kernel = @import("kernel.zig");
+const addressSpace = kernel.addrSpace;
+const Region = kernel.memory.Region;
 
 pub fn LinkedList(comptime T: type) type {
     return extern struct {
@@ -660,7 +663,89 @@ pub const BitSet = extern struct {
     pub fn init(self: *Self, count: u64, mapAll: bool) void {
         self.singleUsageCount = (count + 31) & ~@as(u64, 31);
         self.groupdUsageCount = self.singleUsageCount / groupSize + 1;
-        _ = mapAll;
-        //TODO!: figure it out
+        self.singleUsage = @as([*]u32, addressSpace.alloc((self.singleUsage >> 3) + (self.groupdUsageCount * 2), if (mapAll) Region.Flags.fromFlag(.fixed) else Region.Flags.empty(), 0, true));
+        self.groupUsage = @as([*]u16, @intFromPtr(self.singleUsage) + ((self.singleUsageCount >> 4) * @sizeOf(u16)));
+    }
+
+    pub fn take(self: *@This(), idx: u64) void {
+        const group = idx / groupSize;
+        self.groupUsage[group] -= 1;
+        self.singleUsage[idx >> 5] &= ~(@as(u32, 1) << @as(u5, @truncate(idx)));
+    }
+
+    pub fn get(self: *@This(), count: u64, alignment: u64, asked: u64) u64 {
+        var returnVal: u64 = std.math.maxInt(u64);
+
+        const below = blk: {
+            if (asked != 0) {
+                if (asked < count) return returnVal;
+                break :blk asked - count;
+            } else break :blk asked;
+        };
+
+        if (count == 1 and alignment == 1) {
+            for (self.groupUsage[0..self.groupdUsageCount], 0..) |*grpUsage, groupIdx| {
+                if (grpUsage.* != 0) {
+                    var singleIdx: u64 = 0;
+                    while (singleIdx < groupSize) : (singleIdx += 1) {
+                        const index = groupIdx * groupSize + singleIdx;
+                        if (below != 0 and index >= below) return returnVal;
+                        const maskIdx = (@as(u32, 1) << @as(u5, @intCast(index)));
+                        if (self.singleUsage[index >> 5] & maskIdx != 0) {
+                            self.singleUsage[index >> 5] &= ~maskIdx;
+                            self.groupUsage[groupIdx] -= 1;
+                            return index;
+                        }
+                    }
+                }
+            }
+        }
+        //TODO: implement this lateeeeeeeer
+        //else if (count == 16 and alignment == 16) {}
+        //else if (count == 32 and alignment == 32) {}
+        else {
+            var found: u64 = 0;
+            var start: u64 = 0;
+
+            for (self.grpUsage[0..self.groupdUsageCount], 0..) |*grpUsage, groupIdx| {
+                if (grpUsage.* == 0) {
+                    found = 0;
+                    continue;
+                }
+
+                var singleIdx: u64 = 0;
+                while (singleIdx < groupSize) : (singleIdx += 1) {
+                    const idx = groupIdx * groupSize + singleIdx;
+                    const maskIdx = (@as(u32, 1) << @as(u5, @truncate(idx)));
+
+                    if (self.single_usage[idx >> 5] & maskIdx != 0) {
+                        if (found == 0) {
+                            if (idx >= below and below != 0) return returnVal;
+                            if (idx % alignment != 0) continue;
+
+                            start = idx;
+                        }
+
+                        found += 1;
+                    } else {
+                        found = 0;
+                    }
+
+                    if (found == count) {
+                        returnVal = start;
+
+                        var i: u64 = 0;
+                        while (i < count) : (i += 1) {
+                            const idxB = start + i;
+                            self.single_usage[idxB >> 5] &= ~((@as(u32, 1) << @as(u5, @truncate(idxB))));
+                        }
+
+                        return returnVal;
+                    }
+                }
+            }
+        }
+
+        return returnVal;
     }
 };
