@@ -314,6 +314,7 @@ pub const Physical = extern struct {
         firstModifiedNoWriteNoExecutePage: u64,
         freeOrZeroedPageBitset: kernel.ds.BitSet,
         freePageCount: u64,
+        activePageCount: u64,
         zeroedPageCount: u64,
         standbyPageCount: u64,
         modifiedPageCount: u64,
@@ -880,8 +881,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
     var commitNow = @as(i64, @intCast(count * pageSize));
 
     if (flags.contains(.commitNow)) {
-        //Todo!: implement this
-        // if (!commit(@as(u64,@intCast(commitNow)), true)) return 0;
+        if (!commit(@as(u64, @intCast(commitNow)), true)) return 0;
     } else commitNow = 0;
 
     const simple = count == 1 and alignment == 1 and below == 0;
@@ -898,13 +898,11 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
     } else if (!simple) {
         const pages = kernel.physicalMemoryManager.freeOrZeroedPageBitset.get(count, alignment, below);
         if (pages != std.math.maxInt(u64)) {
-            //TODO!: implement this
-            // MMPhysicalActivatePages(pages, count);
+            MMPhysicalActivatePages(pages, count);
             var address = pages << pageBitCount;
             if (flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), count, true); //todo!: implement PMZero
             return address;
         }
-        // else error
     } else {
         var notZeroed = false;
         var page = kernel.physicalMemoryManager.firstZeroedPage;
@@ -931,12 +929,45 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
 
                     frame.cacheRef.?.* = 0;
                 },
+                .modified => {
+                    if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
+                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                    }
+
+                    frame.cacheRef.?.* = 0;
+                },
+                .modifiedNoRead => {
+                    if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
+                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                    }
+
+                    frame.cacheRef.?.* = 0;
+                },
+                .modifiedNoReadNoExecute => {
+                    if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
+                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                    }
+
+                    frame.cacheRef.?.* = 0;
+                },
+                .bad => {
+                    std.debug.panic("bad page frame", .{});
+                },
+                .unusable => {
+                    std.debug.panic("unusable page frame", .{});
+                },
+                .free => {
+                    if (kernel.physicalMemoryManager.freePageCount == 0) {
+                        std.debug.panic("freePageCount underflow", .{});
+                    }
+                    _ = kernel.physicalMemoryManager.freePageCount.atomicSub(1, .SeqCst);
+                },
                 else => {
                     kernel.physicalMemoryManager.freeOrZeroedPageBitset.take(page); // todo!: implement take in bitset
                 },
             }
 
-            // MMPhysicalActivatePages(page, 1);
+            MMPhysicalActivatePages(page, 1);
 
             var address = page << pageBitCount;
             if (notZeroed and flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), 1, false);
@@ -951,4 +982,90 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
 
     decommit(@as(u64, @intCast(commitNow)), true);
     return 0;
+}
+
+pub export fn commit(byteCount: u64, fixed: bool) callconv(.C) bool {
+    if (byteCount & (pageSize - 1) != 0) std.debug.panic("Bytes should be page-aligned", .{});
+
+    const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
+
+    _ = kernel.physicalMemoryManager.commitMutex.aquire();
+    defer kernel.physicalMemoryManager.commitMutex.release();
+
+    if (kernel.physicalMemoryManager.commitLimit != 0) {
+        if (fixed) {
+            if (requiredPageCount > kernel.physicalMemoryManager.commitFixedLimit - kernel.physicalMemoryManager.commitFixed) return false;
+            if (@as(i64, @intCast(kernel.physicalMemoryManager.getAvailablePageCount())) - requiredPageCount < Physical.Allocator.criticalAvailablePageThreshold and !arch.getCurrentThread().?.isPageGenThread) return false;
+            kernel.physicalMemoryManager.commitFixed += requiredPageCount;
+        } else {
+            if (requiredPageCount > kernel.physicalMemoryManager.getRemainingCommit() - if (arch.getCurrentThread().?.isPageGenThread) @as(i64, 0) else @as(i64, Physical.Allocator.criticalAvailablePageThreshold)) return false;
+            kernel.physicalMemoryManager.commitPageable += requiredPageCount;
+        }
+
+        if (kernel.physicalMemoryManager.shouldTrimObjCache()) _ = kernel.physicalMemoryManager.trimObjCacheEvent.set(true);
+    }
+
+    return true;
+}
+
+export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void {
+    kernel.physicalMemoryManager.pageFrameMutex.assertLocked();
+
+    for (kernel.physicalMemoryManager.pageFrames[pages .. pages + count], 0..) |*frame, i| {
+        switch (frame.state.readVolatile()) {
+            .free => kernel.physicalMemoryManager.freePageCount -= 1,
+            .zeroed => kernel.physicalMemoryManager.zeroedPageCount -= 1,
+            .standby => {
+                kernel.physicalMemoryManager.standbyPageCount -= 1;
+
+                if (kernel.physicalMemoryManager.lastStandbyPage == pages + i) {
+                    if (frame.u.list.prev == &kernel.physicalMemoryManager.firstStandbyPage) {
+                        kernel.physicalMemoryManager.lastStandbyPage = 0;
+                    } else {
+                        kernel.physicalMemoryManager.lastStandbyPage = (@intFromPtr(frame.u.list.prev) - @intFromPtr(kernel.physicalMemoryManager.pageFrames)) / @sizeOf(PageFrame);
+                    }
+                }
+            },
+            .modified => kernel.physicalMemoryManager.modifiedPageCount -= 1,
+            .modifiedNoWrite => kernel.physicalMemoryManager.modifiedNoWritePageCount -= 1,
+            .modifiedNoWriteNoRead => kernel.physicalMemoryManager.modifiedNoWriteNoReadPageCount -= 1,
+            .modifiedNoRead => kernel.physicalMemoryManager.modifiedNoReadPageCount -= 1,
+            .modifiedNoReadNoWrite => kernel.physicalMemoryManager.modifiedNoReadNoWritePageCount -= 1,
+            .modifiedNoReadNoWriteNoExecute => kernel.physicalMemoryManager.modifiedNoReadNoWriteNoExecutePageCount -= 1,
+            .modifiedNoReadNoExecute => kernel.physicalMemoryManager.modifiedNoReadNoExecutePageCount -= 1,
+            .modifiedNoWriteNoExecute => kernel.physicalMemoryManager.modifiedNoWriteNoExecutePageCount -= 1,
+            else => std.debug.panic("Corrupt page frame database", .{}),
+        }
+
+        frame.u.list.prev.?.* = frame.u.list.next.readVolatile();
+
+        if (frame.u.list.next.readVolatile() != 0) {
+            kernel.physicalMemoryManager.pageFrames[frame.u.list.next.readVolatile()].u.list.prev = frame.u.list.prev;
+        }
+        kernel.EsMemoryZero(@intFromPtr(frame), @sizeOf(PageFrame));
+        frame.state.writeVolatile(.active);
+    }
+
+    kernel.physicalMemoryManager.activePageCount += count;
+    MMUpdateAvailablePageCount(false);
+}
+
+export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void {
+    if (kernel.physicalMemoryManager.getAvailablePageCount() >= Physical.Allocator.criticalAvailablePageThreshold) {
+        _ = kernel.physicalMemoryManager.availableNormalEvent.set(true);
+        kernel.physicalMemoryManager.availableCriticalEvent.reset();
+    } else {
+        kernel.physicalMemoryManager.availableNormalEvent.reset();
+        _ = kernel.physicalMemoryManager.availableCriticalEvent.set(true);
+
+        if (!increase) {
+            std.debug.panic("decreased available page count", .{});
+        }
+    }
+
+    if (kernel.physicalMemoryManager.getAvailablePageCount() >= Physical.Allocator.lowAvailablePageThreshold) {
+        kernel.physicalMemoryManager.availableLowEvent.reset();
+    } else {
+        _ = kernel.physicalMemoryManager.availableLowEvent.set(true);
+    }
 }
