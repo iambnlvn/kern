@@ -7,6 +7,10 @@ const Region = kernel.memory.Region;
 const Heap = kernel.memory.Heap;
 const heapCore = kernel.heapCore;
 const heapFixed = kernel.heapFixed;
+const EsMemoryZero = kernel.EsMemoryZero;
+const EsMemoryMove = kernel.EsMemoryMove;
+const EsMemoryCopy = kernel.EsMemoryCopy;
+
 pub fn LinkedList(comptime T: type) type {
     return extern struct {
         first: ?*Node,
@@ -784,6 +788,9 @@ pub fn Array(comptime T: type, comptime heapType: HeapType) type {
                 else => unreachable,
             };
         }
+        pub fn insert(self: *@This(), item: T, position: u64) ?*T {
+            return @as(?*T, _ArrayInsert(@as(*?*u64, @ptrCast(self.ptr)), @intFromPtr(&item), @sizeOf(T), @as(i64, @bitCast(position)), 0, getHeap()));
+        }
     };
 }
 
@@ -820,3 +827,87 @@ pub const Range = extern struct {
         }
     };
 };
+
+pub export fn _ArrayInsert(array: *?*u64, item: u64, itemSize: u64, maybePos: i64, additionalHeaderBytes: u8, heap: *Heap) callconv(.C) u64 {
+    const oldArrLen = ArrayHeaderGetLength(array.*);
+    const position: u64 = if (maybePos == -1) oldArrLen else @as(u64, @intCast(maybePos));
+
+    if (maybePos < 0 or position > oldArrLen) std.debug.panic("position out of bounds", .{});
+
+    if (!_ArraySetLength(array, oldArrLen + 1, itemSize, additionalHeaderBytes, heap)) return 0;
+
+    const arrAddr = @intFromPtr(array.*);
+    EsMemoryMove(arrAddr + itemSize * position, arrAddr + itemSize * oldArrLen, @as(i64, @intCast(itemSize)), false);
+    if (item != 0) EsMemoryCopy(arrAddr + itemSize * position, item, itemSize) else EsMemoryZero(arrAddr + itemSize * position, itemSize);
+    return arrAddr + itemSize * position;
+}
+
+pub export fn _ArrayMaybeInit(array: *?*u64, itemSize: u64, heap: *Heap) callconv(.C) bool {
+    const newLen = 4;
+    if (@as(?*ArrayHeader, @ptrFromInt(heap.allocate(@sizeOf(ArrayHeader) + itemSize * newLen, true)))) |header| {
+        header.length = 0;
+        header.allocated = newLen;
+        array.* = @as(?*u64, @ptrFromInt(@intFromPtr(header) + @sizeOf(ArrayHeader)));
+        return true;
+    } else {
+        return false;
+    }
+}
+pub export fn _ArraySetLength(array: *?*u64, newLen: u64, itemSize: u64, additionalHeaderBytes: u8, heap: *Heap) callconv(.C) bool {
+    if (!_ArrayMaybeInit(array, itemSize, heap)) return false;
+
+    var header = ArrayHeaderGet(array.*);
+
+    if (header.allocated >= newLen) {
+        header.length = newLen;
+        return true;
+    }
+
+    if (!_ArrayEnsureAllocated(array, if (header.allocated * 2 > newLen) header.allocated * 2 else newLen + 16, itemSize, additionalHeaderBytes, heap)) return false;
+
+    header = ArrayHeaderGet(array.*);
+    header.length = newLen;
+    return true;
+}
+
+pub export fn _ArrayEnsureAllocated(array: *?*u64, minAlloc: u64, itemSize: u64, additionalHeaderBytes: u8, heap: *Heap) callconv(.C) bool {
+    if (!_ArrayMaybeInit(array, itemSize, heap)) return false;
+
+    const oldHeader = ArrayHeaderGet(array.*);
+
+    if (oldHeader.allocated >= minAlloc) return true;
+
+    if (@as(?*ArrayHeader, @ptrFromInt(EsHeapReallocate(@intFromPtr(oldHeader) - additionalHeaderBytes, @sizeOf(ArrayHeader) + additionalHeaderBytes + itemSize * minAlloc, false, heap)))) |newHeader| {
+        newHeader.allocated = minAlloc;
+        array.* = @as(?*u64, @ptrFromInt(@intFromPtr(newHeader) + @sizeOf(ArrayHeader) + additionalHeaderBytes));
+        return true;
+    } else {
+        return false;
+    }
+}
+
+pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usize {
+    if (ptr == 0) {
+        return heap.alloc(newSize);
+    }
+
+    const oldSize = heap.getAllocationSize(ptr);
+    if (newSize <= oldSize) {
+        return ptr;
+    }
+
+    const newPtr = heap.alloc(newSize);
+    if (newPtr == 0) {
+        return 0;
+    }
+
+    @memcpy(@as([*]u8, @ptrCast(newPtr)), @as([*]const u8, @ptrCast(ptr))[0..oldSize]);
+
+    if (zero) {
+        @memset(@as([*]u8, @ptrCast(newPtr))[oldSize..newSize], 0);
+    }
+
+    heap.free(ptr);
+
+    return newPtr;
+}
