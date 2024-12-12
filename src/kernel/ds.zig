@@ -4,7 +4,9 @@ const zeroes = @import("kernel.zig").zeroes;
 const kernel = @import("kernel.zig");
 const addressSpace = kernel.addrSpace;
 const Region = kernel.memory.Region;
-
+const Heap = kernel.memory.Heap;
+const heapCore = kernel.heapCore;
+const heapFixed = kernel.heapFixed;
 pub fn LinkedList(comptime T: type) type {
     return extern struct {
         first: ?*Node,
@@ -748,4 +750,73 @@ pub const BitSet = extern struct {
 
         return returnVal;
     }
+};
+
+const ArrayHeader = extern struct {
+    length: u64,
+    allocated: u64,
+};
+
+pub export fn ArrayHeaderGet(array: ?*u64) callconv(.C) *ArrayHeader {
+    return @as(*ArrayHeader, @ptrFromInt(@intFromPtr(array) - @sizeOf(ArrayHeader)));
+}
+
+pub export fn ArrayHeaderGetLength(array: ?*u64) callconv(.C) u64 {
+    if (array) |arr| return ArrayHeaderGet(arr).length else return 0;
+}
+pub fn Array(comptime T: type, comptime heapType: HeapType) type {
+    return extern struct {
+        ptr: ?[*]T,
+        pub fn length(self: @This()) u64 {
+            return ArrayHeaderGetLength(@as(?*u64, @ptrCast(self.ptr)));
+        }
+        pub fn getSlice(self: @This()) []T {
+            if (self.ptr) |ptr| {
+                return ptr[0..self.length()];
+            } else {
+                std.debug.panic("null array", .{});
+            }
+        }
+        pub fn getHeap() *Heap {
+            return switch (heapType) {
+                .core => &heapCore,
+                .fixed => &heapFixed,
+                else => unreachable,
+            };
+        }
+    };
+}
+
+const HeapType = enum {
+    core,
+    fixed,
+};
+pub const Range = extern struct {
+    from: u64,
+    to: u64,
+    pub const Set = extern struct {
+        ranges: Array(Range, .core),
+        contigous: u64,
+        const Self = @This();
+
+        pub fn find(self: *Self, offset: u64, touching: bool) ?*Range {
+            const len = self.ranges.len;
+            if (len == 0) null;
+
+            var low: i64 = 0;
+            var high = @as(i64, len - 1);
+
+            while (low <= high) {
+                const idx = @divTrunc(low + (high - low), 2);
+                const range = &self.ranges.ptr.?[@as(u64, @intCast(idx))];
+
+                if (range.from <= offset and (offset < range.to or (touching and offset <= range.to))) return range else if (range.from <= offset) low = idx + 1 else high = idx - 1;
+            }
+            return null;
+        }
+
+        pub fn contains(self: *Self, offset: u64) bool {
+            if (self.ranges.length() != 0) return self.find(offset, false) != null else return offset < self.contiguous;
+        }
+    };
 };
