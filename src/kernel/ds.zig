@@ -782,6 +782,11 @@ pub fn Array(comptime T: type, comptime heapType: HeapType) type {
                 std.debug.panic("null array", .{});
             }
         }
+
+        pub fn free(self: *@This()) void {
+            _ArrayFree(@as(*?*u64, @ptrCast(&self.ptr)), @sizeOf(T), getHeap());
+        }
+
         pub fn getHeap() *Heap {
             return switch (heapType) {
                 .core => &heapCore,
@@ -905,13 +910,102 @@ pub const Range = extern struct {
                 } else break;
             }
 
-            if (modify) self.ranges.delete_many(deleteStart, deleteCount);
+            if (modify) self.ranges.deleteMany(deleteStart, deleteCount);
 
             self.validate();
 
             if (maybeDelta) |delta| delta.* = @as(i64, @intCast(newRange.to)) - @as(i64, @intCast(newRange.from)) - @as(i64, @intCast(deleteTotal));
 
             return true;
+        }
+        pub fn clear(self: *Self, from: u64, to: u64, maybeDelta: ?*i64, modify: bool) bool {
+            if (to <= from) std.debug.panic("invalid range", .{});
+
+            if (self.ranges.length() == 0) {
+                if (from < self.contiguous and self.contiguous != 0) {
+                    if (to < self.contiguous) {
+                        if (modify) {
+                            if (!self.normalize()) return false;
+                        } else {
+                            if (maybeDelta) |delta| delta.* = @as(i64, @intCast(from)) - @as(i64, @intCast(to));
+                            return true;
+                        }
+                    } else {
+                        if (maybeDelta) |delta| delta.* = @as(i64, @intCast(from)) - @as(i64, @intCast(self.contiguous));
+                        if (modify) self.contiguous = from;
+                        return true;
+                    }
+                } else {
+                    if (maybeDelta) |delta| delta.* = 0;
+                    return true;
+                }
+            }
+
+            if (self.ranges.length() == 0) {
+                self.ranges.free();
+                if (maybeDelta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (to <= self.ranges.getFirst().from or from >= self.ranges.getLast().to) {
+                if (maybeDelta) |delta| delta.* = 0;
+                return true;
+            }
+
+            if (from <= self.ranges.getFirst().from and to >= self.ranges.getLast().to) {
+                if (maybeDelta) |delta| {
+                    var total: i64 = 0;
+
+                    for (self.ranges.getSlice()) |range| {
+                        total += @as(i64, @intCast(range.to)) - @as(i64, @intCast(range.from));
+                    }
+
+                    delta.* = -total;
+                }
+
+                if (modify) self.ranges.free();
+
+                return true;
+            }
+
+            var overlapStart = self.ranges.length();
+            var overlapCount: u64 = 0;
+
+            for (self.ranges.getSlice(), 0..) |*range, i| {
+                if (range.to > from and range.from < to) {
+                    overlapStart = i;
+                    overlapCount = 1;
+                    break;
+                }
+            }
+
+            for (self.ranges.getSlice()[overlapStart + 1 ..]) |*range| {
+                if (range.to >= from and range.from < to) overlapCount += 1 else break;
+            }
+
+            const tempDelta: i64 = 0;
+
+            if (overlapCount == 1) {
+                std.debug.panic("not implemented", .{});
+            } else if (overlapCount > 1) {
+                std.debug.panic("not implemented", .{});
+            }
+
+            if (maybeDelta) |delta| delta.* = tempDelta;
+
+            self.validate();
+            return true;
+        }
+
+        fn validate(self: *@This()) void {
+            if (self.ranges.length() == 0) return;
+            var prevTo: u64 = 0;
+            for (self.ranges.getSlice()) |range| {
+                if (prevTo != 0 and range.from <= prevTo) std.debug.panic("range in set is not placed after the prior range", .{});
+                if (range.from >= range.to) std.debug.panic("Invalid range in set", .{});
+
+                prevTo = range.to;
+            }
         }
     };
 };
@@ -1015,4 +1109,11 @@ pub export fn _ArrayDelete(array: ?*u64, position: u64, itemSize: u64, count: u6
 
 pub fn mMoveBackwards(comptime T: type, addr: T) std.meta.Int(.signed, @bitSizeOf(T)) {
     return -@as(std.meta.Int(.signed, @bitSizeOf(T)), @intCast(addr));
+}
+
+pub export fn _ArrayFree(array: *?*u64, itemSize: u64, heap: *Heap) callconv(.C) void {
+    if (array.* == null) return;
+
+    heap.free(@intFromPtr(ArrayHeaderGet(array.*)), @sizeOf(ArrayHeader) + itemSize * ArrayHeaderGet(array.*).allocated);
+    array.* = null;
 }
