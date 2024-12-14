@@ -768,6 +768,7 @@ pub export fn ArrayHeaderGet(array: ?*u64) callconv(.C) *ArrayHeader {
 pub export fn ArrayHeaderGetLength(array: ?*u64) callconv(.C) u64 {
     if (array) |arr| return ArrayHeaderGet(arr).length else return 0;
 }
+
 pub fn Array(comptime T: type, comptime heapType: HeapType) type {
     return extern struct {
         ptr: ?[*]T,
@@ -790,6 +791,25 @@ pub fn Array(comptime T: type, comptime heapType: HeapType) type {
         }
         pub fn insert(self: *@This(), item: T, position: u64) ?*T {
             return @as(?*T, _ArrayInsert(@as(*?*u64, @ptrCast(self.ptr)), @intFromPtr(&item), @sizeOf(T), @as(i64, @bitCast(position)), 0, getHeap()));
+        }
+        pub fn getFirst(self: *@This()) *T {
+            if (self.length() == 0) {
+                return null;
+            } else {
+                return &self.ptr.?[0];
+            }
+        }
+
+        pub fn getLast(self: *@This()) *T {
+            if (self.length() == 0) {
+                return null;
+            } else {
+                return &self.ptr.?[self.length() - 1];
+            }
+        }
+
+        pub fn deleteMany(self: *@This(), position: u64, count: u64) void {
+            _ArrayDelete(@as(?*u64, @ptrCast(self.ptr)), position, @sizeOf(T), count);
         }
     };
 }
@@ -910,4 +930,21 @@ pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usi
     heap.free(ptr);
 
     return newPtr;
+}
+
+pub export fn _ArrayDelete(array: ?*u64, position: u64, itemSize: u64, count: u64) callconv(.C) void {
+    if (count == 0) return;
+
+    const oldArrLen = ArrayHeaderGetLength(array);
+    if (position >= oldArrLen) std.debug.panic("position out of bounds", .{});
+    if (count > oldArrLen - position) std.debug.panic("count out of bounds", .{});
+
+    ArrayHeaderGet(array).length = oldArrLen - count;
+    const arrayAddress = @intFromPtr(array);
+
+    EsMemoryMove(arrayAddress + itemSize * (position + count), arrayAddress + itemSize * oldArrLen, mMoveBackwards(u64, itemSize) * @as(i64, @intCast(count)), false);
+}
+
+pub fn mMoveBackwards(comptime T: type, addr: T) std.meta.Int(.signed, @bitSizeOf(T)) {
+    return -@as(std.meta.Int(.signed, @bitSizeOf(T)), @intCast(addr));
 }
