@@ -99,3 +99,41 @@ pub export fn EsMemoryZero(dst: u64, byteCount: u64) callconv(.C) void {
     const slice = @as([*]u8, @ptrFromInt(dst))[0..byteCount];
     @memset(slice, 0);
 }
+
+pub export fn EsMemoryCopyReverse(destination: u64, source: u64, byteCount: u64) callconv(.C) void {
+    if (byteCount == 0) return;
+
+    var dst = &(@as([*]u8, @ptrFromInt(destination))[0..byteCount][byteCount - 1]);
+    var src = &(@as([*]u8, @ptrFromInt(source))[0..byteCount][byteCount - 1]);
+
+    var bytes: u64 = byteCount;
+    while (bytes >= 1) {
+        dst.* = src.*;
+        src = @as(*u8, @ptrFromInt(@intFromPtr(src) - 1));
+        dst = @as(*u8, @ptrFromInt(@intFromPtr(destination) - 1));
+        bytes -= 1;
+    }
+}
+
+pub export fn EsMemoryCopy(dst: u64, src: u64, byteCount: u64) callconv(.C) void {
+    if (byteCount == 0) return;
+
+    const destSlice = @as([*]u8, @ptrFromInt(dst))[0..byteCount];
+    const srcSlice = @as([*]const u8, @ptrFromInt(src))[0..byteCount];
+    @memcpy(destSlice, srcSlice);
+}
+
+pub export fn EsMemoryMove(startAddr: u64, endAddr: u64, amount: i64, isZeroEmptySpace: bool) callconv(.C) void {
+    if (endAddr < startAddr) return;
+
+    if (amount > 0) {
+        const amountU = @as(u64, @intCast(amount));
+        EsMemoryCopyReverse(startAddr + amountU, startAddr, endAddr - startAddr);
+
+        if (isZeroEmptySpace) EsMemoryZero(startAddr, amountU);
+    } else if (amount < 0) {
+        const amountU = @as(u64, @intCast(@abs(amount) catch unreachable));
+        EsMemoryCopy(startAddr - amountU, startAddr, endAddr - startAddr);
+        if (isZeroEmptySpace) EsMemoryZero(endAddr - amountU, amountU);
+    }
+}
