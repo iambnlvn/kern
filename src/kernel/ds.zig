@@ -823,7 +823,7 @@ pub const Range = extern struct {
     to: u64,
     pub const Set = extern struct {
         ranges: Array(Range, .core),
-        contigous: u64,
+        contiguous: u64,
         const Self = @This();
 
         pub fn find(self: *Self, offset: u64, touching: bool) ?*Range {
@@ -844,6 +844,74 @@ pub const Range = extern struct {
 
         pub fn contains(self: *Self, offset: u64) bool {
             if (self.ranges.length() != 0) return self.find(offset, false) != null else return offset < self.contiguous;
+        }
+
+        pub fn normalize(self: *@This()) bool {
+            if (self.contiguous != 0) {
+                const oldCont = self.contiguous;
+                self.contiguous = 0;
+
+                if (!self.set(0, oldCont, null, true)) return false;
+            }
+
+            return true;
+        }
+        pub fn set(self: *Self, from: u64, to: u64, maybeDelta: ?*i64, modify: bool) bool {
+            if (to <= from) std.debug.panic("invalid range", .{});
+
+            const initLen = self.ranges.length();
+            if (initLen == 0) {
+                if (maybeDelta) |delta| {
+                    if (from >= self.contiguous) delta.* = @as(i64, @intCast(to)) - @as(i64, @intCast(from)) else if (to >= self.contiguous) delta.* = @as(i64, @intCast(to)) - @as(i64, @intCast(self.contiguous)) else delta.* = 0;
+                }
+
+                if (!modify) return true;
+
+                if (from <= self.contiguous) {
+                    if (to > self.contiguous) self.contiguous = to;
+                    return true;
+                }
+
+                if (!self.normalize()) return false;
+            }
+
+            const newRange = Range{
+                .from = if (self.find(from, true)) |left| left.from else from,
+                .to = if (self.find(to, true)) |right| right.to else to,
+            };
+
+            var i: u64 = 0;
+            while (i <= self.ranges.length()) : (i += 1) {
+                if (i == self.ranges.length() or self.ranges.ptr.?[i].to > newRange.from) {
+                    if (modify) {
+                        if (self.ranges.insert(newRange, i) == null) return false;
+                        i += 1;
+                    }
+
+                    break;
+                }
+            }
+
+            const deleteStart = i;
+            var deleteCount: u64 = 0;
+            var deleteTotal: u64 = 0;
+
+            for (self.ranges.getSlice()[i..]) |*range| {
+                const overlap = (range.from >= newRange.from and range.from <= newRange.to) or (range.to >= newRange.from and range.to <= newRange.to);
+
+                if (overlap) {
+                    deleteCount += 1;
+                    deleteTotal += range.to - range.from;
+                } else break;
+            }
+
+            if (modify) self.ranges.delete_many(deleteStart, deleteCount);
+
+            self.validate();
+
+            if (maybeDelta) |delta| delta.* = @as(i64, @intCast(newRange.to)) - @as(i64, @intCast(newRange.from)) - @as(i64, @intCast(deleteTotal));
+
+            return true;
         }
     };
 };
