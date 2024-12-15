@@ -57,7 +57,7 @@ pub fn Volatile(comptime T: type) type {
 pub const arch = blk: {
     const currentArch = @import("builtin").target.cpu.arch;
     switch (currentArch) {
-        .x86_64 => break :blk @import("arch/x86_64.zig"), //Todo: implement arch
+        .x86_64 => break :blk @import("arch/x86_64.zig"),
         else => @compileError(std.fmt.comptimePrint("Unsupported arch {s}\n", .{currentArch.genericName()})),
     }
 };
@@ -136,4 +136,34 @@ pub export fn EsMemoryMove(startAddr: u64, endAddr: u64, amount: i64, isZeroEmpt
         EsMemoryCopy(startAddr - amountU, startAddr, endAddr - startAddr);
         if (isZeroEmptySpace) EsMemoryZero(endAddr - amountU, amountU);
     }
+}
+
+pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usize {
+    if (ptr == 0) {
+        return heap.alloc(newSize);
+    }
+
+    const oldSize = heap.getAllocationSize(ptr);
+    if (newSize <= oldSize) {
+        return ptr;
+    }
+
+    const newPtr = heap.alloc(newSize);
+    if (newPtr == 0) {
+        return 0;
+    }
+
+    @memcpy(@as([*]u8, @ptrCast(newPtr)), @as([*]const u8, @ptrCast(ptr))[0..oldSize]);
+
+    if (zero) {
+        @memset(@as([*]u8, @ptrCast(newPtr))[oldSize..newSize], 0);
+    }
+
+    heap.free(ptr);
+
+    return newPtr;
+}
+
+export fn EsHeapFree(addr: u64, expectedSize: u64, heap: *Heap) callconv(.C) void {
+    heap.free(addr, expectedSize);
 }
