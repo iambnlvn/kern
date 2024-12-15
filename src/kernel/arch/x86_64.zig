@@ -330,7 +330,7 @@ pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlag
             _ = mapPage(&kernel.addrSpace, askedPhysicalAddr, va, mapPageFlags);
             return true;
         } else if (va >= coreAddrSpaceStart and va < coreAddrSpaceStart + coreAddrSpaceSize and forSupervisor) {
-            return kernel.coreAddrSpace.handlePageFault(va, flags);
+            return kernel.coreAddressSpace.handlePageFault(va, flags);
         } else if (va >= kernelAddrSpaceStart and va < kernelAddrSpaceSize and forSupervisor) {
             return kernel.addrSpace.handlePgaeFault(va, flags);
         } else if (va >= modulesStart and va < modulesStart + modulesSize and forSupervisor) {
@@ -445,6 +445,76 @@ pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u
     return true;
 }
 
+pub export fn unMapPages(
+    space: *memory.AddressSpace,
+    virtualAddrStart: u64,
+    pageCount: u64,
+    flags: memory.UnmapPagesFlags,
+    unmapMax: u64,
+    resumePos: ?*u64,
+) callconv(.C) void {
+    _ = kernel.physicalMemoryManager.pageFrameMutex.aquire();
+    defer kernel.physicalMemoryManager.pageFrameMutex.release();
+
+    _ = space.arch.mutex.aquire();
+    space.arch.mutex.release();
+
+    const tableBase = virtualAddrStart & 0x0000FFFFFFFFF000;
+    const start: u64 = if (resumePos) |rp| rp.* else 0;
+
+    var page = start;
+    while (page < pageCount) : (page += 1) {
+        const va = (page << pageBitCount) + tableBase;
+        const indices = PageTables.computeIndices(va);
+
+        comptime var level: PageTables.Level = .level4;
+        if (PageTables.access(level, indices).* & 1 == 0) {
+            page -= (va >> pageBitCount) % (1 << (entryPerPageTableBitCount * @intFromEnum(level)));
+            page += 1 << (entryPerPageTableBitCount * @intFromEnum(level));
+            continue;
+        }
+
+        level = .level3;
+        if (PageTables.access(level, indices).* & 1 == 0) {
+            page -= (va >> pageBitCount) % (1 << (entryPerPageTableBitCount * @intFromEnum(level)));
+            page += 1 << (entryPerPageTableBitCount * @intFromEnum(level));
+            continue;
+        }
+
+        level = .level2;
+        if (PageTables.access(level, indices).* & 1 == 0) {
+            page -= (va >> pageBitCount) % (1 << (entryPerPageTableBitCount * @intFromEnum(level)));
+            page += 1 << (entryPerPageTableBitCount * @intFromEnum(level));
+            continue;
+        }
+
+        const translation = PageTables.access(.level1, indices).*;
+
+        if (translation & 1 == 0) continue;
+
+        const copy = (translation & (1 << 9)) != 0;
+
+        if (copy and flags.contains(.balanceFile) and !flags.contains(.freeCopied)) continue;
+
+        if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0)) {
+            std.debug.panic("page found without accessed or dirty bit set", .{});
+        }
+
+        PageTables.access(.level1, indices).* = 0;
+        const pa = translation & 0x0000FFFFFFFFF000;
+
+        if (flags.contains(.free) or (flags.contains(.free_copied) and copy)) {
+            memory.physical_free(pa, true, 1);
+        } else if (flags.contains(.balanceFile)) {
+            _ = unmapMax;
+            //TODO: implement balance file
+        }
+    }
+    //TODO!: invalide pages
+
+    // MMArchInvalidatePages(virtualAddrStart, pageCount);
+}
+
 inline fn handleMissingPageTable(
     space: *memory.AddressSpace,
     comptime level: PageTables.Level,
@@ -498,3 +568,40 @@ const PageTables = extern struct {
         return indices;
     }
 };
+
+pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
+    var i: u64 = 0;
+    while (i < 256) : (i += 1) {
+        if (PageTables.accessAt(.level4, i).* == 0) continue;
+
+        var j = i * entryPerPageTableBitCount;
+        while (j < (i + 1) * entryPerPageTableBitCount) : (j += 1) {
+            if (PageTables.accessAt(.level3, j).* == 0) continue;
+
+            var k = j * entryPerPageTableBitCount;
+            while (k < (j + 1) * entryPerPageTableBitCount) : (k += 1) {
+                if (PageTables.accessAt(.level2, k).* == 0) continue;
+
+                memory.physicalFree(PageTables.accessAt(.level2, k).* & ~@as(u64, pageSize - 1), false, 1);
+                space.arch.activePageTableCount -= 1;
+            }
+
+            memory.physicalFree(PageTables.accessAt(.level3, j).* & ~@as(u64, pageSize - 1), false, 1);
+            space.arch.activePageTableCount -= 1;
+        }
+
+        memory.physicalFree(PageTables.accessAt(.level4, i).* & ~@as(u64, pageSize - 1), false, 1);
+        space.arch.activePageTableCount -= 1;
+    }
+
+    if (space.arch.activePageTableCount != 0) {
+        std.debug.panic("space has still active page tables", .{});
+    }
+
+    _ = kernel.coreAddressSpace.reserveMutex.aquire();
+    const l1CommitRegion = kernel.coreAddressSpace.findRegion(@intFromPtr(space.arch.commit.L1)).?;
+    unMapPages(&kernel.coreAddressSpace, l1CommitRegion.descriptor.baseAddr, l1CommitRegion.descriptor.pageCount, memory.UnmapPagesFlags.fromFlag(.free), 0, null);
+    kernel.coreAddressSpace.unreserve(l1CommitRegion, false, false);
+    kernel.coreAddressSpace.reserveMutex.release();
+    memory.decommit(space.arch.commitedPagePerTable * pageSize, true);
+}
