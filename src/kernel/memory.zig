@@ -9,6 +9,7 @@ const WriterLock = kernel.sync.WriterLock;
 const AVLTree = kernel.ds.AVLTree;
 const LinkedList = kernel.ds.LinkedList;
 const Bitflag = kernel.ds.Bitflag;
+const Range = kernel.ds.Range;
 const AsyncTask = kernel.scheduling.AsyncTask;
 const List = kernel.ds.List;
 const arch = @import("./arch/x86_64.zig");
@@ -17,6 +18,8 @@ const Process = scheduling.Process;
 const Thread = scheduling.Thread;
 const pageSize = arch.pageSize;
 const pageBitCount = arch.pageBitCount;
+const EsHeapFree = kernel.EsHeapFree;
+
 pub const SharedRegion = extern struct {
     size: u64,
     handleCount: Volatile(u64),
@@ -42,7 +45,7 @@ pub const Region = extern struct {
                 fileHandleFlags: u64,
             },
             normal: extern struct {
-                // commit: Range.Set, TODO: implement Range.Set
+                commit: Range.Set,
                 commitPageCount: u64,
                 guardBefore: ?*Region,
                 guardAfter: ?*Region,
@@ -53,10 +56,10 @@ pub const Region = extern struct {
     },
     u: extern union {
         item: extern struct {
-            base: AVLTree(Region).Item,
+            base: AVLTree(Region).Node,
             u: extern union {
-                size: AVLTree(Region).Item,
-                nonGuard: LinkedList(Region).Item,
+                size: AVLTree(Region).Node,
+                nonGuard: LinkedList(Region).Node,
             },
         },
         core: extern struct {
@@ -101,7 +104,7 @@ pub const AddressSpace = extern struct {
     arch: arch.AddressSpace,
     freeRegionBase: AVLTree(Region),
     freeRegionSize: AVLTree(Region),
-    freeRegionsNonGuard: LinkedList(Region),
+    usedRegionsNonGuard: LinkedList(Region),
     usedRegions: AVLTree(Region),
     reserveMutex: Mutex,
     refCount: Volatile(i32),
@@ -199,10 +202,110 @@ pub const AddressSpace = extern struct {
         decommit(deltaUnwrapped * pageSize, region.flags.contains(.fixed));
         space.commitCount -= deltaUnwrapped;
         region.data.u.normal.commitPageCount -= deltaUnwrapped;
-        //Todo!: implement this in arch
-        // arch.unMapPages(space, region.descriptor.baseAddr + pageOffset * pageSize, pageCount, UnmapPagesFlags.fromFlag(.free), 0, null);
+        arch.unMapPages(space, region.descriptor.baseAddr + pageOffset * pageSize, pageCount, UnmapPagesFlags.fromFlag(.free), 0, null);
 
         return true;
+    }
+    pub fn destroy(space: *Self) callconv(.C) void {
+        var maybeNode = space.usedRegionsNonGuard.first;
+        while (maybeNode) |node| {
+            const region = node.value.?;
+            maybeNode = node.next;
+            _ = space.free(region.descriptor.baseAddr, 0, false);
+        }
+
+        while (space.freeRegionBase.find(0, .SmallestAboveOrEqual)) |node| {
+            space.freeRegionBase.remove(&node.value.?.u.item.base);
+            space.freeRegionSize.remove(&node.value.?.u.item.u.size);
+            EsHeapFree(@intFromPtr(node.value), @sizeOf(Region), &kernel.heapCore);
+        }
+
+        arch.freeAddressSpace(space);
+    }
+
+    pub fn unreserve(space: *AddressSpace, region: *Region, unmapPages: bool, isGuardRegion: bool) callconv(.C) void {
+        space.reserveMutex.assertLocked();
+
+        if (kernel.physicalMemoryManager.nextRegionToBalance == region) {
+            kernel.physicalMemoryManager.nextRegionToBalance = if (region.u.item.u.nonGuard.next) |next| next.value else null;
+            kernel.physicalMemoryManager.balanceResumePosition = 0;
+        }
+
+        if (region.flags.contains(.normal)) {
+            if (region.data.u.normal.guardBefore) |before| space.unreserve(before, false, true);
+            if (region.data.u.normal.guardAfter) |after| space.unreserve(after, false, true);
+        } else if (region.flags.contains(.guard) and !isGuardRegion) {
+            std.debug.panic("Cannot unreserve guard region", .{});
+            return;
+        }
+
+        if (region.u.item.u.nonGuard.list != null and !isGuardRegion) {
+            region.u.item.u.nonGuard.removeFromList();
+        }
+
+        if (unmapPages) {
+            _ = arch.unMapPages(space, region.descriptor.baseAddr, region.descriptor.pageCount, UnmapPagesFlags.empty(), 0, null);
+        }
+
+        space.reserveCount += region.descriptor.pageCount;
+
+        if (space == &kernel.coreAddressSpace) {
+            region.u.core.used = false;
+
+            var remove1: i64 = -1;
+            var remove2: i64 = -1;
+
+            for (kernel.mmCoreRegions[0..kernel.mmCoreRegionCount], 0..) |*r, i| {
+                if (!(remove1 != -1 or remove2 != 1)) break;
+                if (r.u.core.used) continue;
+                if (r == region) continue;
+
+                if (r.descriptor.baseAddr == region.descriptor.baseAddr + (region.descriptor.pageCount << pageBitCount)) {
+                    region.descriptor.pageCount += r.descriptor.pageCount;
+                    remove1 = @as(i64, @intCast(i));
+                } else if (region.descriptor.baseAddr == r.descriptor.baseAddr + (r.descriptor.pageCount << pageBitCount)) {
+                    region.descriptor.pageCount += r.descriptor.pageCount;
+                    region.descriptor.baseAddr = r.descriptor.baseAddr;
+                    remove2 = @as(i64, @intCast(i));
+                }
+            }
+
+            if (remove1 != -1) {
+                kernel.mmCoreRegionCount -= 1;
+                kernel.mmCoreRegions[@as(u64, @intCast(remove1))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
+                if (remove2 == @as(i64, @intCast(kernel.mmCoreRegionCount))) remove2 = remove1;
+            }
+
+            if (remove2 != -1) {
+                kernel.mmCoreRegionCount -= 1;
+                kernel.mmCoreRegions[@as(u64, @intCast(remove2))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
+            }
+        } else {
+            space.usedRegions.remove(&region.u.item.base);
+            const address = region.descriptor.baseAddr;
+
+            if (space.freeRegionBase.find(address, .LargestBelowOrEqual)) |before| {
+                if (before.value.?.descriptor.baseAddr + before.value.?.descriptor.pageCount * pageSize == region.descriptor.baseAddr) {
+                    region.descriptor.baseAddr = before.value.?.descriptor.baseAddr;
+                    region.descriptor.pageCount += before.value.?.descriptor.pageCount;
+                    space.freeRegionBase.remove(before);
+                    space.freeRegionSize.remove(&before.value.?.u.item.u.size);
+                    EsHeapFree(@intFromPtr(before.value), @sizeOf(Region), &kernel.heapCore);
+                }
+            }
+
+            if (space.freeRegionBase.find(address, .SmallestAboveOrEqual)) |after| {
+                if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize == after.value.?.descriptor.baseAddr) {
+                    region.descriptor.pageCount += after.value.?.descriptor.pageCount;
+                    space.freeRegionBase.remove(after);
+                    space.freeRegionSize.remove(&after.value.?.u.item.u.size);
+                    EsHeapFree(@intFromPtr(after.value), @sizeOf(Region), &kernel.heapCore);
+                }
+            }
+
+            _ = space.freeRegionBase.insert(&region.u.item.base, region, region.descriptor.baseAddr, .panic);
+            _ = space.freeRegionSize.insert(&region.u.item.u.size, region, region.descriptor.pageCount, .allow);
+        }
     }
 };
 
@@ -352,6 +455,7 @@ pub const Physical = extern struct {
         nextRegionToBalance: ?*Region,
         balanceResumePosition: u64,
         const Self = @This();
+        const zeroPageThreshold = 16;
 
         inline fn getAvailablePageCount(self: Self) u64 {
             return self.zeroedPageCount + self.freePageCount + self.standbyPageCount;
@@ -395,7 +499,6 @@ pub const Physical = extern struct {
         zeroed = 2,
         lockAquired = 3,
     });
-
     pub const memoryManipulationRegionPageCount = 0x10;
 };
 
@@ -1068,4 +1171,45 @@ export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void {
     } else {
         _ = kernel.physicalMemoryManager.availableLowEvent.set(true);
     }
+}
+
+pub fn physicalFree(askedPage: u64, mtxAlreadyAquired: bool, count: u64) callconv(.C) void {
+    if (askedPage == 0) std.debug.panic("invalid page", .{});
+
+    if (mtxAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.assertLocked() else _ = kernel.physicalMemoryManager.pageFrameMutex.aquire();
+    if (!kernel.physicalMemoryManager.pageFrameDBInitialized) std.debug.panic("PMM not yet initialized", .{});
+
+    const page = askedPage >> pageBitCount;
+
+    MMPhysicalInsertFreePagesStart();
+
+    for (kernel.physicalMemoryManager.pageFrames[0..count]) |*frame| {
+        if (frame.state.readVolatile() == .free) std.debug.panic("attempting to free a free page", .{});
+        if (kernel.physicalMemoryManager.commitFixedLimit != 0) kernel.physicalMemoryManager.activePageCount -= 1;
+        physicalInsertFreePagesNext(page);
+    }
+
+    MMPhysicalInsertFreePagesEnd();
+
+    if (!mtxAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.release();
+}
+
+export fn MMPhysicalInsertFreePagesStart() callconv(.C) void {}
+
+pub fn physicalInsertFreePagesNext(page: u64) callconv(.C) void {
+    const frame = &kernel.physicalMemoryManager.pageFrames[page];
+    frame.state.writeVolatile(.free);
+
+    frame.u.list.next.writeVolatile(kernel.physicalMemoryManager.firstFreePage);
+    frame.u.list.prev = &kernel.physicalMemoryManager.firstFreePage;
+    if (kernel.physicalMemoryManager.firstFreePage != 0) kernel.physicalMemoryManager.pageFrames[kernel.physicalMemoryManager.firstFreePage].u.list.prev = &frame.u.list.next.value;
+    kernel.physicalMemoryManager.firstFreePage = page;
+
+    kernel.physicalMemoryManager.freeOrZeroedPageBitset.put(page);
+    kernel.physicalMemoryManager.freePageCount += 1;
+}
+
+export fn MMPhysicalInsertFreePagesEnd() callconv(.C) void {
+    if (kernel.physicalMemoryManager.freePageCount > Physical.Allocator.zeroPageThreshold) _ = kernel.physicalMemoryManager.zeroPageEvent.set(true);
+    MMUpdateAvailablePageCount(true);
 }
