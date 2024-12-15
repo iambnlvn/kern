@@ -10,6 +10,7 @@ const heapFixed = kernel.heapFixed;
 const EsMemoryZero = kernel.EsMemoryZero;
 const EsMemoryMove = kernel.EsMemoryMove;
 const EsMemoryCopy = kernel.EsMemoryCopy;
+const EsHeapReallocate = kernel.EsHeapReallocate;
 
 pub fn LinkedList(comptime T: type) type {
     return extern struct {
@@ -673,13 +674,18 @@ pub const BitSet = extern struct {
         self.groupUsage = @as([*]u16, @intFromPtr(self.singleUsage) + ((self.singleUsageCount >> 4) * @sizeOf(u16)));
     }
 
-    pub fn take(self: *@This(), idx: u64) void {
+    pub fn take(self: *Self, idx: u64) void {
         const group = idx / groupSize;
         self.groupUsage[group] -= 1;
         self.singleUsage[idx >> 5] &= ~(@as(u32, 1) << @as(u5, @truncate(idx)));
     }
 
-    pub fn get(self: *@This(), count: u64, alignment: u64, asked: u64) u64 {
+    pub fn put(self: *Self, index: u64) void {
+        self.singleUsage[index >> 5] |= @as(u32, 1) << @as(u5, @truncate(index));
+        self.groupUsage[index / groupSize] += 1;
+    }
+
+    pub fn get(self: *Self, count: u64, alignment: u64, asked: u64) u64 {
         var returnVal: u64 = std.math.maxInt(u64);
 
         const below = blk: {
@@ -724,7 +730,7 @@ pub const BitSet = extern struct {
                     const idx = groupIdx * groupSize + singleIdx;
                     const maskIdx = (@as(u32, 1) << @as(u5, @truncate(idx)));
 
-                    if (self.single_usage[idx >> 5] & maskIdx != 0) {
+                    if (self.singleUsage[idx >> 5] & maskIdx != 0) {
                         if (found == 0) {
                             if (idx >= below and below != 0) return returnVal;
                             if (idx % alignment != 0) continue;
@@ -743,7 +749,7 @@ pub const BitSet = extern struct {
                         var i: u64 = 0;
                         while (i < count) : (i += 1) {
                             const idxB = start + i;
-                            self.single_usage[idxB >> 5] &= ~((@as(u32, 1) << @as(u5, @truncate(idxB))));
+                            self.singleUsage[idxB >> 5] &= ~((@as(u32, 1) << @as(u5, @truncate(idxB))));
                         }
 
                         return returnVal;
@@ -1066,32 +1072,6 @@ pub export fn _ArrayEnsureAllocated(array: *?*u64, minAlloc: u64, itemSize: u64,
     } else {
         return false;
     }
-}
-
-pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usize {
-    if (ptr == 0) {
-        return heap.alloc(newSize);
-    }
-
-    const oldSize = heap.getAllocationSize(ptr);
-    if (newSize <= oldSize) {
-        return ptr;
-    }
-
-    const newPtr = heap.alloc(newSize);
-    if (newPtr == 0) {
-        return 0;
-    }
-
-    @memcpy(@as([*]u8, @ptrCast(newPtr)), @as([*]const u8, @ptrCast(ptr))[0..oldSize]);
-
-    if (zero) {
-        @memset(@as([*]u8, @ptrCast(newPtr))[oldSize..newSize], 0);
-    }
-
-    heap.free(ptr);
-
-    return newPtr;
 }
 
 pub export fn _ArrayDelete(array: ?*u64, position: u64, itemSize: u64, count: u64) callconv(.C) void {
