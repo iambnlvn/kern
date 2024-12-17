@@ -17,7 +17,7 @@ pub export var addrSpace: memory.AddressSpace = undefined;
 pub export var heapCore: Heap = undefined;
 pub export var heapFixed: Heap = undefined;
 pub export var physicalMemoryManager: memory.Physical.Allocator = undefined;
-
+pub export var globalData: *GlobalData = undefined;
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,
@@ -167,3 +167,23 @@ pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usi
 export fn EsHeapFree(addr: u64, expectedSize: u64, heap: *Heap) callconv(.C) void {
     heap.free(addr, expectedSize);
 }
+
+pub const GlobalData = extern struct {
+    clickChainTimeoutMS: Volatile(i32),
+    doubleClickTimeoutMS: Volatile(i32),
+    uiScale: Volatile(f32),
+    uiScaleFactor: Volatile(f32),
+    uiScaleFactorInverse: Volatile(f32),
+    swapLeftAndRightButtons: Volatile(bool),
+    showCursorShadow: Volatile(bool),
+    useSmartQuotes: Volatile(bool),
+    enableHoverState: Volatile(bool),
+    animationTimeMultiplier: Volatile(f32),
+    schedulerTimeMS: Volatile(u64),
+    schedulerTimeOffset: Volatile(u64),
+    keyboardLayout: Volatile(u16),
+    keyboardLayoutVersion: Volatile(u16),
+    keyboardLayoutVariant: Volatile(u16),
+    keyboardLayoutVariantVersion: Volatile(u16),
+    keyboardLayoutCountry: Volatile(u16),
+};
