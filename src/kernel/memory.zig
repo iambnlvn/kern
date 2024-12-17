@@ -152,6 +152,13 @@ pub const AddressSpace = extern struct {
         return region.descriptor.baseAddr;
     }
 
+    pub fn openRef(space: *AddressSpace) callconv(.C) void {
+        if (space != &kernel.addrSpace) {
+            if (space.refCount.readVolatile() < 1) std.debug.panic("space has invalid reference count", .{});
+            _ = space.refCount.atomicFetchAdd(1);
+        }
+    }
+
     pub fn free(space: *AddressSpace, addr: u64, expectedSize: u64, userOnly: bool) callconv(.C) bool {
         _ = space.reserveMutex.acquire();
         defer space.reserveMutex.release();
