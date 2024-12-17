@@ -153,7 +153,7 @@ pub const AddressSpace = extern struct {
     }
 
     pub fn free(space: *AddressSpace, addr: u64, expectedSize: u64, userOnly: bool) callconv(.C) bool {
-        _ = space.reserveMutex.aquire();
+        _ = space.reserveMutex.acquire();
         defer space.reserveMutex.release();
 
         const region = space.findRegion(addr) orelse return false;
@@ -315,7 +315,7 @@ pub fn decommit(byteCount: u64, fixed: bool) callconv(.C) void {
     }
 
     const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
-    _ = kernel.physicalMemoryManager.commitMutex.aquire();
+    _ = kernel.physicalMemoryManager.commitMutex.acquire();
     defer kernel.physicalMemoryManager.commitMutex.release();
 
     decommitPages(fixed, requiredPageCount);
@@ -588,7 +588,7 @@ pub const Heap = extern struct {
                 return 0;
             }
         }
-        _ = self.mutex.aquire();
+        _ = self.mutex.acquire();
         self.validate();
 
         const region = regionBlk: {
@@ -726,7 +726,7 @@ pub const Heap = extern struct {
             std.debug.panic("Heap mismatch: the first region's data does not point to the expected heap", .{});
         }
 
-        _ = self.mutex.aquire();
+        _ = self.mutex.acquire();
         self.validate();
 
         region.used = 0;
@@ -795,7 +795,7 @@ pub const Heap = extern struct {
     //     const firstRegion = getFirstRegion(region);
     //     self.validateHeap(firstRegion);
 
-    //     _ = self.mutex.aquire();
+    //     _ = self.mutex.acquire();
     //     self.validate();
 
     //     region.used = 0;
@@ -938,7 +938,7 @@ pub const Heap = extern struct {
 };
 
 export fn PMZero(askedPagePtr: [*]u64, askedPageCount: u64, isContiguous: bool) callconv(.C) void {
-    _ = kernel.physicalMemoryManager.manipulationLock.aquire();
+    _ = kernel.physicalMemoryManager.manipulationLock.acquire();
 
     var pageCount = askedPageCount;
     var pages = askedPagePtr;
@@ -953,7 +953,7 @@ export fn PMZero(askedPagePtr: [*]u64, askedPageCount: u64, isContiguous: bool) 
             _ = arch.mapPage(&kernel.coreAddressSpace, if (isContiguous) pages[0] + (i << pageBitCount) else pages[i], region + pageSize * i, MapPageFlags.fromFlags(.{ .overwrite, .noNewTables }));
         }
 
-        kernel.physicalMemoryManager.manipulationProcLock.aquire();
+        kernel.physicalMemoryManager.manipulationProcLock.acquire();
 
         i = 0;
         while (i < pagesToProcess) : (i += 1) {
@@ -978,7 +978,7 @@ export var earlyZeroBuffer: [pageSize]u8 align(pageSize) = undefined;
 
 export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below: u64) callconv(.C) u64 {
     const mutexAlreadyAquired = flags.contains(.lockAquired);
-    if (!mutexAlreadyAquired) _ = kernel.physicalMemoryManager.pageFrameMutex.aquire() else kernel.physicalMemoryManager.pageFrameMutex.assertLocked();
+    if (!mutexAlreadyAquired) _ = kernel.physicalMemoryManager.pageFrameMutex.acquire() else kernel.physicalMemoryManager.pageFrameMutex.assertLocked();
     defer if (!mutexAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.release();
 
     var commitNow = @as(i64, @intCast(count * pageSize));
@@ -1092,7 +1092,7 @@ pub export fn commit(byteCount: u64, fixed: bool) callconv(.C) bool {
 
     const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
 
-    _ = kernel.physicalMemoryManager.commitMutex.aquire();
+    _ = kernel.physicalMemoryManager.commitMutex.acquire();
     defer kernel.physicalMemoryManager.commitMutex.release();
 
     if (kernel.physicalMemoryManager.commitLimit != 0) {
@@ -1176,7 +1176,7 @@ export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void {
 pub fn physicalFree(askedPage: u64, mtxAlreadyAquired: bool, count: u64) callconv(.C) void {
     if (askedPage == 0) std.debug.panic("invalid page", .{});
 
-    if (mtxAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.assertLocked() else _ = kernel.physicalMemoryManager.pageFrameMutex.aquire();
+    if (mtxAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.assertLocked() else _ = kernel.physicalMemoryManager.pageFrameMutex.acquire();
     if (!kernel.physicalMemoryManager.pageFrameDBInitialized) std.debug.panic("PMM not yet initialized", .{});
 
     const page = askedPage >> pageBitCount;

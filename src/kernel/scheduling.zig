@@ -188,7 +188,7 @@ pub const Process = extern struct {
         if (self.type != .normal) std.debug.panic("A critical process has crashed", .{});
 
         const pauseFlag = false;
-        _ = self.crashMutex.aquire();
+        _ = self.crashMutex.acquire();
         if (!self.crashed) {
             self.crashed = true;
             pause = true;
@@ -207,7 +207,7 @@ pub const Process = extern struct {
     }
 
     pub fn pause(self: *Process, resumeAfter: bool) callconv(.C) void {
-        _ = self.threadsMutex.aquire();
+        _ = self.threadsMutex.acquire();
         var maybreThreadNode = self.threads.first;
 
         while (maybreThreadNode) |threadNode| {
@@ -222,7 +222,7 @@ pub const Process = extern struct {
 };
 
 pub const Scheduler = extern struct {
-    dispachSpinLock: SpinLock,
+    dispatchSpinLock: SpinLock,
     activeTimersSpinLock: SpinLock,
     activeThreads: [Thread.priorityCount]LinkedList(Thread),
     pausedThreads: LinkedList(Thread),
@@ -247,7 +247,7 @@ pub const Scheduler = extern struct {
         unblockAll: bool,
         prevMutexOwner: ?*Thread,
     ) void {
-        self.dispachSpinLock.assertLocked();
+        self.dispatchSpinLock.assertLocked();
         var unblockedThread = blockedThreads.first;
         if (unblockedThread == null) return;
 
@@ -268,7 +268,7 @@ pub const Scheduler = extern struct {
     pub fn unblockThread(self: *@This(), unblockedThread: *Thread, prevMutexOwner: ?*Thread) void {
         _ = prevMutexOwner;
 
-        self.dispachSpinLock.assertLocked();
+        self.dispatchSpinLock.assertLocked();
         switch (unblockedThread.state.readVolatile()) {
             .waitingMutex => {
                 if (unblockedThread.blocking.mutex == null) {
@@ -356,7 +356,7 @@ pub const Scheduler = extern struct {
     }
 
     pub fn getThreadEffectivePriority(self: *@This(), thread: *Thread) i8 {
-        self.dispachSpinLock.assertLocked();
+        self.dispatchSpinLock.assertLocked();
         for (thread.blockedThreadPriorities[0..@as(u64, @intCast(thread.priority))], 0..) |priority, idx| {
             if (priority != 0) return @as(i8, @intCast(idx));
         }
@@ -365,7 +365,7 @@ pub const Scheduler = extern struct {
 };
 
 export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
-    kernel.scheduler.dispachSpinLock.aquire();
+    kernel.scheduler.dispatchSpinLock.acquire();
 
     if (thread.paused.readVolatile() == !resumeAfter) return;
 
@@ -375,7 +375,7 @@ export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
         if (thread.state.readVolatile() == .active) {
             if (thread.executing.readVolatile()) {
                 if (thread == arch.getCurrentThread()) {
-                    kernel.scheduler.dispachSpinLock.release();
+                    kernel.scheduler.dispatchSpinLock.release();
 
                     arch.fakeTimerInterrupt();
 
@@ -393,7 +393,7 @@ export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
         kernel.scheduler.addThreadToActiveThreads(thread, false);
     }
 
-    kernel.scheduler.dispachSpinLock.release();
+    kernel.scheduler.dispatchSpinLock.release();
 }
 
 pub const AsyncTask = extern struct {
@@ -402,7 +402,7 @@ pub const AsyncTask = extern struct {
     const Callback = fn (*@This()) void;
 
     pub fn register(self: *@This(), cb: Callback) void {
-        kernel.scheduler.asyncTaskSpinLock.aquire();
+        kernel.scheduler.asyncTaskSpinLock.acquire();
         if (self.cb == 0) {
             self.cb = @intFromPtr(cb);
             arch.getLocalStorage().?.asyncTaskList.insert(&self.item, false);
@@ -420,7 +420,7 @@ const Timer = extern struct {
     arg: u64,
 
     pub fn setEx(self: *@This(), triggerInMS: u64, maybeCb: ?AsyncTask.Callback, maybeArg: u64) void {
-        kernel.scheduler.activeTimersSpinLock.aquire();
+        kernel.scheduler.activeTimersSpinLock.acquire();
 
         removeFromActiveTimersIfNeeded(self);
 
@@ -463,7 +463,7 @@ const Timer = extern struct {
     }
 
     pub fn remove(self: *@This()) void {
-        kernel.scheduler.activeTimersSpinLock.aquire();
+        kernel.scheduler.activeTimersSpinLock.acquire();
         if (self.callback != null) std.debug.panic("timer with callback cannot be removed", .{});
         if (self.node.list != null) kernel.scheduler.activeTimers.remove(&self.node);
         kernel.scheduler.activeTimersSpinLock.release();

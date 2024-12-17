@@ -382,7 +382,7 @@ pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u
     const aquireSpaceLock = !flags.contains(.noNewTables);
 
     if (aquireSpaceLock) {
-        space.arch.mutex.aquire();
+        space.arch.mutex.acquire();
     }
 
     defer if (aquireSpaceLock) space.arch.mutex.release();
@@ -453,10 +453,10 @@ pub export fn unMapPages(
     unmapMax: u64,
     resumePos: ?*u64,
 ) callconv(.C) void {
-    _ = kernel.physicalMemoryManager.pageFrameMutex.aquire();
+    _ = kernel.physicalMemoryManager.pageFrameMutex.acquire();
     defer kernel.physicalMemoryManager.pageFrameMutex.release();
 
-    _ = space.arch.mutex.aquire();
+    _ = space.arch.mutex.acquire();
     space.arch.mutex.release();
 
     const tableBase = virtualAddrStart & 0x0000FFFFFFFFF000;
@@ -598,7 +598,7 @@ pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
         std.debug.panic("space has still active page tables", .{});
     }
 
-    _ = kernel.coreAddressSpace.reserveMutex.aquire();
+    _ = kernel.coreAddressSpace.reserveMutex.acquire();
     const l1CommitRegion = kernel.coreAddressSpace.findRegion(@intFromPtr(space.arch.commit.L1)).?;
     unMapPages(&kernel.coreAddressSpace, l1CommitRegion.descriptor.baseAddr, l1CommitRegion.descriptor.pageCount, memory.UnmapPagesFlags.fromFlag(.free), 0, null);
     kernel.coreAddressSpace.unreserve(l1CommitRegion, false, false);
