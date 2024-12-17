@@ -605,3 +605,12 @@ pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
     kernel.coreAddressSpace.reserveMutex.release();
     memory.decommit(space.arch.commitedPagePerTable * pageSize, true);
 }
+
+//TODO!: implement
+pub export fn getTimeMS() callconv(.C) u64 {}
+//TODO!: complete implementation later
+pub export fn nextTimer(ms: u64) callconv(.C) void {
+    _ = ms;
+    while (!kernel.scheduler.started.readVolatile()) {}
+    getLocalStorage().?.isSchedulerReady = true;
+}
