@@ -47,6 +47,9 @@ pub const Thread = extern struct {
     executing: Volatile(bool),
     paused: Volatile(bool),
     yieldIpiReceived: Volatile(bool),
+    tempAddrSpace: ?*volatile memory.AddressSpace,
+    interruptCtx: ?*arch.InterruptContext,
+    killAsyncTask: AsyncTask,
     blocking: extern union {
         mutex: ?*volatile Mutex,
         writer: extern struct {
@@ -265,6 +268,164 @@ pub const Scheduler = extern struct {
         }
     }
 
+    pub fn pickThread(self: *@This(), local: *arch.LocalStorage) ?*Thread {
+        self.dispatchSpinLock.assertLocked();
+
+        if ((local.asyncTaskList.nextOrFirst != null or local.isInAsyncTask) and local.asyncTaskThread.?.state.readVolatile() == .active) {
+            return local.asyncTaskThread;
+        }
+
+        for (self.activeThreads) |*threadNode| {
+            if (threadNode.first) |first| {
+                first.removeFromList();
+                return first.value;
+            }
+        }
+
+        return local.idleThread;
+    }
+
+    pub fn maybeUpdateList(self: *@This(), thread: *Thread) void {
+        if (thread.type == .asyncTask) return;
+        if (thread.type != .normal) std.debug.panic("trying to update the active list of a non-normal thread", .{});
+
+        self.dispatchSpinLock.assertLocked();
+
+        if (thread.state.readVolatile() != .active or thread.executing.readVolatile()) return;
+        if (thread.item.list == null) std.debug.panic("Thread is active and not executing, but it is not found in any active thread list. Thread ID: {}, State: {}", .{ thread.id, thread.state });
+
+        const effectivePriority = @as(u64, @intCast(self.getThreadEffectivePriority(thread)));
+        if (&self.activeThreads[effectivePriority] == thread.item.list) return;
+        thread.item.removeFromList();
+    }
+
+    pub fn yield(self: *@This(), ctx: *arch.InterruptContext) void {
+        if (!self.started.readVolatile()) return;
+        if (arch.getLocalStorage()) |local| {
+            if (!local.isSchedulerReady) return;
+
+            if (local.processorID == 0) {
+                self.timeMs = arch.getTimeMS();
+                kernel.globalData.schedulerTimeMS.writeVolatile(self.timeMs);
+
+                self.activeTimersSpinLock.acquire();
+
+                var maybeTimerNode = self.activeTimers.first;
+
+                while (maybeTimerNode) |timerNode| {
+                    const timer = timerNode.value.?;
+                    const next = timerNode.next;
+
+                    if (timer.triggerInMs <= self.timeMs) {
+                        self.activeTimers.remove(timerNode);
+                        _ = timer.event.set(false);
+                        if (@as(?AsyncTask.Callback, @ptrFromInt(timer.callback))) |cb| {
+                            timer.asyncTask.register(cb);
+                        }
+                    } else {
+                        break;
+                    }
+                    maybeTimerNode = next;
+                }
+            }
+            self.activeTimersSpinLock.release();
+
+            if (local.spinlockCount != 0) std.debug.panic("Cannot yield: {} spinlocks are still acquired", .{local.spinlockCount});
+
+            arch.disableInterrupts();
+
+            self.dispatchSpinLock.acquire();
+
+            if (self.dispatchSpinLock.interruptsEnabled.readVolatile()) {
+                std.debug.panic("Cannot proceed: interrupts were enabled when the scheduler lock was acquired. This may lead to inconsistent state or race conditions.", .{});
+            }
+
+            if (!local.currentThread.?.executing.readVolatile()) {
+                std.debug.panic("Cannot yield: current thread is not executing", .{});
+            }
+
+            const oldAddrSpace = if (local.currentThread.?.tempAddrSpace) |tas| @as(*memory.AddressSpace, @ptrCast(tas)) else local.currentThread.?.process.addrSpace;
+            local.currentThread.?.interruptCtx = ctx;
+            local.currentThread.?.executing.writeVolatile(false);
+
+            const killThread = local.currentThread.?.terminatableState.readVolatile() == .terminatable and local.currentThread.?.terminating.readVolatile();
+            const keepThreadAlive = local.currentThread.?.terminatableState.readVolatile() == .userBlockRequest and local.currentThread.?.terminating.readVolatile();
+
+            if (killThread) {
+                local.currentThread.?.state.writeVolatile(.terminated);
+
+                //TODO!: implement kill
+                // local.currentThread.?.killAsyncTask.register(Thread.kill);
+            } else if (local.currentThread.?.state.readVolatile() == .waitingMutex) {
+                const mtx = @as(*Mutex, @ptrCast(local.currentThread.?.blocking.mutex.?));
+
+                if (!keepThreadAlive and mtx.ownerThread != null) {
+                    mtx.ownerThread.?.blockedThreadPriorities[@as(u64, @intCast(local.currentThread.?.priority))] += 1;
+                    self.maybeUpdateList(@as(*Thread, @ptrCast(@alignCast(@as(@alignOf(Thread), mtx.ownerThread.?)))));
+                    mtx.blockedThreads.append(&local.currentThread.?.item);
+                } else {
+                    local.currentThread.?.state.writeVolatile(.active);
+                }
+            } else if (local.currentThread.?.state.readVolatile() == .waitingEvent) {
+                if (keepThreadAlive) {
+                    local.currentThread.?.state.writeVolatile(.active);
+                } else {
+                    var unblocked = false;
+
+                    for (local.currentThread.?.blocking.event.array[0..local.currentThread.?.blocking.event.count]) |event| {
+                        if (event.?.state.readVolatile() != 0) {
+                            local.currentThread.?.state.writeVolatile(.active);
+                            unblocked = true;
+                            break;
+                        }
+                    }
+
+                    if (!unblocked) {
+                        for (local.currentThread.?.blocking.event.array[0..local.currentThread.?.blocking.event.count], 0..) |ev, i| {
+                            const event = @as(*Event, @ptrCast(ev.?));
+                            const item = @as(*LinkedList(Thread).Node, @ptrCast(&local.currentThread.?.blocking.event.items.?[i]));
+                            event.blockedThreads.append(item);
+                        }
+                    }
+                }
+            } else if (local.currentThread.?.state.readVolatile() == .waitingWriterLock) {
+                const lock = @as(*WriterLock, @ptrCast(local.currentThread.?.blocking.writer.lock.?));
+                if ((local.currentThread.?.blocking.writer.type == WriterLock.shared and lock.state.readVolatile() >= 0) or
+                    (local.currentThread.?.blocking.writer.type == WriterLock.exclusive and lock.state.readVolatile() == 0))
+                {
+                    local.currentThread.?.state.writeVolatile(.active);
+                } else {
+                    lock.blockedThreads.append(&local.currentThread.?.item);
+                }
+            }
+
+            if (!killThread and local.currentThread.?.state.readVolatile() == .active) {
+                if (local.currentThread.?.type == .normal) {
+                    self.addThreadToActiveThreads(local.currentThread.?, false);
+                } else if (local.currentThread.?.type == .idle or local.currentThread.?.type == .asyncTask) {
+                    local.currentThread.?.state.writeVolatile(.active);
+                } else {
+                    std.debug.panic("unrecognized thread type", .{});
+                }
+            }
+
+            const newThread = self.pickThread(local) orelse std.debug.panic("Could not find a thread to execute", .{});
+            local.currentThread = newThread;
+            if (newThread.executing.readVolatile()) std.debug.panic("thread in active queue already executing", .{});
+
+            newThread.executing.writeVolatile(true);
+            newThread.execProcId = local.processorID;
+            newThread.cpuTimeSlices.increment();
+            if (newThread.type == .idle) newThread.process.idleTimeSlices += 1 else newThread.process.cpuTimeSlices += 1;
+
+            arch.nextTimer(1);
+            const newCtx = newThread.interruptCtx;
+            const addrSpace = if (newThread.tempAddrSpace) |tas| @as(*memory.AddressSpace, @ptrCast(tas)) else newThread.process.addrSpace;
+            addrSpace.openRef();
+            arch.switchContext(newCtx, &addrSpace.arch, newThread.kernelStack, newThread, oldAddrSpace);
+            std.debug.panic("do context switch unexpectedly returned", .{});
+        }
+    }
     pub fn unblockThread(self: *@This(), unblockedThread: *Thread, prevMutexOwner: ?*Thread) void {
         _ = prevMutexOwner;
 
