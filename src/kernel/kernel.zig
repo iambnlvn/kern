@@ -18,6 +18,7 @@ pub export var heapCore: Heap = undefined;
 pub export var heapFixed: Heap = undefined;
 pub export var physicalMemoryManager: memory.Physical.Allocator = undefined;
 pub export var globalData: *GlobalData = undefined;
+export var ipiLock: sync.SpinLock = undefined;
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,
@@ -166,6 +167,18 @@ pub fn EsHeapReallocate(ptr: usize, newSize: usize, zero: bool, heap: *Heap) usi
 
 export fn EsHeapFree(addr: u64, expectedSize: u64, heap: *Heap) callconv(.C) void {
     heap.free(addr, expectedSize);
+}
+
+pub export fn EsMemorySumBytes(source: [*]u8, byteCount: u64) callconv(.C) u8 {
+    if (byteCount == 0) return 0;
+
+    const slice = source[0..byteCount];
+    var total: u64 = 0;
+    for (slice) |byte| {
+        total += byte;
+    }
+
+    return @as(u8, @truncate(total));
 }
 
 pub const GlobalData = extern struct {
