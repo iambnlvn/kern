@@ -5,6 +5,8 @@ const List = kernel.ds.List;
 const Mutex = kernel.sync.Mutex;
 const zeroes = kernel.zeroes;
 const memory = kernel.memory;
+const Volatile = kernel.Volatile;
+const ACPI = @import("../drivers/ACPI.zig");
 pub const kernelAddrSpaceStart = 0xFFFF900000000000;
 pub const kernelAddrSpaceSize = 0xFFFFF00000000000 - 0xFFFF900000000000;
 pub const pageSize = 0x1000;
@@ -18,6 +20,13 @@ pub const modulesStart = 0xFFFFFFFF90000000;
 pub const modulesSize = 0xFFFFFFFFC0000000 - 0xFFFFFFFF90000000;
 pub const entryPerPageTableBitCount = 9;
 const pageBitCount = 0xc;
+const timerInterrupt = 0x40;
+const ipiLock = kernel.ipiLock;
+
+export var tlbShootdownVirtualAddress: Volatile(u64) = undefined;
+export var tlbShootdownPageCount: Volatile(u64) = undefined;
+
+const invalidateAllPagesThreshold = 1024;
 
 pub fn initThread(
     kernelStack: u64,
@@ -120,6 +129,7 @@ pub extern fn invalidatePage(page: u64) callconv(.C) void;
 pub extern fn ProcessorReadCR3() callconv(.C) u64;
 pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
+pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 
 const LocalStorage = extern struct {
     currentThread: ?*Thread,
@@ -613,4 +623,112 @@ pub export fn nextTimer(ms: u64) callconv(.C) void {
     _ = ms;
     while (!kernel.scheduler.started.readVolatile()) {}
     getLocalStorage().?.isSchedulerReady = true;
+}
+
+export fn MMArchInvalidatePages(startVA: u64, pageCount: u64) callconv(.C) void {
+    ipiLock.acquire();
+    tlbShootdownVirtualAddress.accessVolatile().* = startVA;
+    tlbShootdownPageCount.accessVolatile().* = pageCount;
+
+    ArchCallFunctionOnAllProcessors(TLBShootdownCallback, true);
+    ipiLock.release();
+}
+
+fn TLBShootdownCallback() void {
+    const pageCount = tlbShootdownPageCount.readVolatile();
+    if (pageCount > invalidateAllPagesThreshold) {
+        ProcessorInvalidateAllPages();
+    } else {
+        var i: u64 = 0;
+        var page = tlbShootdownVirtualAddress.readVolatile();
+
+        while (i < pageCount) : ({
+            i += 1;
+            page += pageSize;
+        }) {
+            invalidatePage(page);
+        }
+    }
+}
+
+const CallFunctionOnAllProcessorsCallback = fn () void;
+export var callFunctionOnAllProcessorsCallback: CallFunctionOnAllProcessorsCallback = undefined;
+export var callFunctionOnAllProcessorsRemaining: Volatile(u64) = undefined;
+
+pub const IPI = struct {
+    pub const yield = 0x41;
+    pub const callFnOnAllProcs = 0xf0;
+    pub const tlbShootdown = 0xf1;
+    pub const kernelPanic = 0;
+
+    pub fn send(interrupt: u64, nmi: bool, procID: i32) callconv(.C) u64 {
+        if (interrupt != IPI.kernelPanic) ipiLock.assertLocked();
+
+        var ignored: u64 = 0;
+
+        for (ACPI.driver.procs[0..ACPI.driver.procCount]) |*processor| {
+            if (procID != -1) {
+                if (procID != processor.kernelProcessorID) {
+                    ignored += 1;
+                    continue;
+                }
+            } else {
+                if (processor == getLocalStorage().?.cpu or processor.local == null or !processor.local.?.isSchedulerReady) {
+                    ignored += 1;
+                    continue;
+                }
+            }
+
+            const destination = @as(u32, @intCast(processor.APICID)) << 24;
+            const command = @as(u32, @intCast(interrupt | (1 << 14) | if (nmi) @as(u32, 0x400) else @as(u32, 0)));
+            LAPIC.write(0x310 >> 2, destination);
+            LAPIC.write(0x300 >> 2, command);
+
+            while (LAPIC.read(0x300 >> 2) & (1 << 12) != 0) {}
+        }
+
+        return ignored;
+    }
+    pub fn sendYield(thread: *Thread) callconv(.C) void {
+        thread.yieldIpiReceived.writeVolatile(false);
+        ipiLock.acquire();
+        _ = IPI.send(IPI.yield, false, -1);
+        ipiLock.release();
+        while (!thread.yieldIpiReceived.readVolatile()) {}
+    }
+};
+
+const LAPIC = struct {
+    fn write(reg: u32, value: u32) void {
+        ACPI.driver.LAPICAddr[reg] = value;
+    }
+
+    fn read(reg: u32) u32 {
+        return ACPI.driver.LAPICAddr[reg];
+    }
+
+    fn nextTimer(ms: u64) void {
+        LAPIC.write(0x320 >> 2, timerInterrupt | (1 << 17));
+        LAPIC.write(0x380 >> 2, @as(u32, @intCast(ACPI.driver.LAPICTicksPerMS * ms)));
+    }
+
+    fn endOfInterrupt() void {
+        LAPIC.write(0xb0 >> 2, 0);
+    }
+};
+
+fn ArchCallFunctionOnAllProcessors(cb: CallFunctionOnAllProcessorsCallback, includeThisProc: bool) void {
+    ipiLock.assertLocked();
+    if (cb == 0) std.debug.panic("Callback is null", .{});
+
+    const cpuCount = ACPI.driver.procCount;
+    if (cpuCount > 1) {
+        @as(*volatile CallFunctionOnAllProcessorsCallback, @ptrCast(&callFunctionOnAllProcessorsCallback)).* = cb;
+        callFunctionOnAllProcessorsRemaining.writeVolatile(cpuCount);
+        const ignored = IPI.send(IPI.callFnOnAllProcs, false, -1);
+        _ = callFunctionOnAllProcessorsRemaining.atomicFetchSub(ignored);
+        while (callFunctionOnAllProcessorsRemaining.readVolatile() != 0) {}
+    }
+
+    if (includeThisProc) cb();
 }
