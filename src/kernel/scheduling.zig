@@ -354,8 +354,7 @@ pub const Scheduler = extern struct {
             if (killThread) {
                 local.currentThread.?.state.writeVolatile(.terminated);
 
-                //TODO!: implement kill
-                // local.currentThread.?.killAsyncTask.register(Thread.kill);
+                local.currentThread.?.killAsyncTask.register(Thread.kill);
             } else if (local.currentThread.?.state.readVolatile() == .waitingMutex) {
                 const mtx = @as(*Mutex, @ptrCast(local.currentThread.?.blocking.mutex.?));
 
