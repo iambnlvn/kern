@@ -28,6 +28,10 @@ export var tlbShootdownPageCount: Volatile(u64) = undefined;
 export var timeStampCounterSynchronizationValue = Volatile(u64){ .value = 0 };
 const invalidateAllPagesThreshold = 1024;
 
+var getTimeFromPitMsStarted = false;
+var getTimeFromPitMsLast: u64 = 0;
+var getTimeFromPitMSCumulative: u64 = 0;
+
 pub fn initThread(
     kernelStack: u64,
     kernelStackSize: u64,
@@ -130,7 +134,8 @@ pub extern fn ProcessorReadCR3() callconv(.C) u64;
 pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
 pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
-
+pub extern fn out8(port: u16, value: u8) callconv(.C) void;
+pub extern fn in8(port: u16) callconv(.C) u8;
 const LocalStorage = extern struct {
     currentThread: ?*Thread,
     idleThread: ?*Thread,
@@ -632,8 +637,49 @@ pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
     memory.decommit(space.arch.commitedPagePerTable * pageSize, true);
 }
 
-pub export fn getTimeMS() callconv(.C) u64 {}
+pub export fn getTimeMS() callconv(.C) u64 {
+    timeStampCounterSynchronizationValue.writeVolatile(((timeStampCounterSynchronizationValue.readVolatile() & 0x8000000000000000) ^ 0x8000000000000000) | ProcessorReadTimeStamp());
+    if (ACPI.driver.HPETBaseAddr != null and ACPI.driver.HPETPeriod != 0) {
+        //femtoseconds to milliseconds
+        const fs2ms = 1000000000000;
+        const reading: u128 = ACPI.driver.HPETBaseAddr.?[30];
+        return @as(u64, @intCast(reading * ACPI.driver.HPETPeriod / fs2ms));
+    }
 
+    return ArchGetTimeFromPITMs();
+}
+
+const IO_PIT_COMMAND = 0x0043;
+const IO_PIT_DATA = 0x0040;
+fn initializePIT() void {
+    out8(IO_PIT_COMMAND, 0x30);
+    out8(IO_PIT_DATA, 0xff);
+    out8(IO_PIT_DATA, 0xff);
+    getTimeFromPitMsStarted = true;
+    getTimeFromPitMsLast = 0xffff;
+}
+
+fn readPIT() u16 {
+    out8(IO_PIT_COMMAND, 0);
+    var x: u16 = in8(IO_PIT_DATA);
+    x |= @as(u16, in8(IO_PIT_DATA)) << 8;
+    return x;
+}
+
+export fn ArchGetTimeFromPITMs() callconv(.C) u64 {
+    if (!getTimeFromPitMsStarted) {
+        initializePIT();
+        return 0;
+    } else {
+        const x = readPIT();
+        getTimeFromPitMSCumulative += getTimeFromPitMsLast - x;
+        if (x > getTimeFromPitMsLast) {
+            getTimeFromPitMSCumulative += 0x10000;
+        }
+        getTimeFromPitMsLast = x;
+        return getTimeFromPitMSCumulative * 1000 / 1193182;
+    }
+}
 pub export fn nextTimer(ms: u64) callconv(.C) void {
     while (!kernel.scheduler.started.readVolatile()) {}
     getLocalStorage().?.isSchedulerReady = true;
