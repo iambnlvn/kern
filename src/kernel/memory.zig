@@ -77,7 +77,7 @@ pub const Region = extern struct {
         notCachable = 1,
         notCOmmitTracking = 2,
         readOnly = 3,
-        wopyOnWrite = 4,
+        copyOnWrite = 4,
         writeCombining = 5,
         executable = 6,
         user = 7,
@@ -190,6 +190,94 @@ pub const AddressSpace = extern struct {
         return true;
     }
 
+    pub fn handlePageFault(space: *AddressSpace, askedAddr: u64, flags: HandlePageFaultFlags) callconv(.C) bool {
+        const address = askedAddr & ~@as(u64, pageSize - 1);
+        const isLockAcquired = flags.contains(.lockAcquired);
+
+        var region = blk: {
+            if (isLockAcquired) {
+                space.reserveMutex.assertLocked();
+                const result = space.findRegion(askedAddr) orelse return false;
+                if (!result.data.pin.takeEx(WriterLock.shared, true)) return false;
+                break :blk result;
+            } else {
+                if (kernel.physicalMemoryManager.getAvailablePageCount() < Physical.Allocator.criticalAvailablePageThreshold and arch.getCurrentThread() != null and !arch.getCurrentThread().?.isPageGenThread) {
+                    _ = kernel.physicalMemoryManager.availableCriticalEvent.wait();
+                }
+                _ = space.reserveMutex.acquire();
+                defer space.reserveMutex.release();
+
+                const result = space.findRegion(askedAddr) orelse return false;
+                if (!result.data.pin.takeEx(WriterLock.shared, true)) return false;
+                break :blk result;
+            }
+        };
+
+        defer region.data.pin.returnLock(WriterLock.shared);
+        _ = region.data.mapMutex.acquire();
+        defer region.data.mapMutex.release();
+
+        if (arch.translateAddr(address, flags.contains(.write)) != 0) return true;
+
+        var copyOnWrite = false;
+        var markModified = false;
+
+        if (flags.contains(.write)) {
+            if (region.flags.contains(.copyOnWrite)) copyOnWrite = true else if (region.flags.contains(.readOnly)) return false else markModified = true;
+        }
+
+        const offsetIntoRegion = address - region.descriptor.baseAddr;
+        var physicalAllocFlags = Physical.Flags.empty();
+        var isZeroPage = true;
+
+        if (space.user) {
+            physicalAllocFlags = physicalAllocFlags.orFlag(.zeroed);
+            isZeroPage = false;
+        }
+
+        var mapPageFlags = MapPageFlags.empty();
+        if (space.user) mapPageFlags = mapPageFlags.orFlag(.user);
+        if (region.flags.contains(.notCachable)) mapPageFlags = mapPageFlags.orFlag(.notCacheable);
+        if (region.flags.contains(.writeCombining)) mapPageFlags = mapPageFlags.orFlag(.writeCombining);
+        if (!markModified and !region.flags.contains(.fixed) and region.flags.contains(.file)) mapPageFlags = mapPageFlags.orFlag(.readOnly);
+
+        if (region.flags.contains(.physical)) {
+            _ = arch.mapPage(space, region.data.u.physical.offset + address - region.descriptor.baseAddr, address, mapPageFlags);
+            return true;
+        } else if (region.flags.contains(.shared)) {
+            const sharedRegion = region.data.u.shared.region.?;
+            if (sharedRegion.handleCount.readVolatile() == 0) std.debug.panic("Shared region has no handles", .{});
+            _ = sharedRegion.mutex.acquire();
+
+            const offset = address - region.descriptor.baseAddr + region.data.u.shared.offset;
+
+            if (offset >= sharedRegion.size) {
+                sharedRegion.mutex.release();
+                return false;
+            }
+
+            const entry = @as(*u64, @ptrFromInt(sharedRegion.addr + (offset / pageSize * @sizeOf(u64))));
+
+            if (entry.* & 1 != 0) isZeroPage = false else entry.* = physicalAllocFlagged(physicalAllocFlags) | 1;
+
+            _ = arch.mapPage(space, entry.* & ~@as(u64, pageSize - 1), address, mapPageFlags);
+            if (isZeroPage) kernel.EsMemoryZero(address, pageSize);
+            sharedRegion.mutex.release();
+            return true;
+        } else if (region.flags.contains(.file)) {} else if (region.flags.contains(.normal)) {
+            if (!region.flags.contains(.notCOmmitTracking)) {
+                if (!region.data.u.normal.commit.contains(offsetIntoRegion >> pageBitCount)) {
+                    return false;
+                }
+            }
+
+            _ = arch.mapPage(space, physicalAllocFlagged(physicalAllocFlags), address, mapPageFlags);
+            if (isZeroPage) kernel.EsMemoryZero(address, pageSize);
+            return true;
+        } else if (region.flags.contains(.guard)) {} else {
+            return false;
+        }
+    }
     pub fn decommitRange(space: *AddressSpace, region: *Region, pageOffset: u64, pageCount: u64) callconv(.C) bool {
         space.reserveMutex.assertLocked();
 
