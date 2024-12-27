@@ -25,7 +25,7 @@ const ipiLock = kernel.ipiLock;
 
 export var tlbShootdownVirtualAddress: Volatile(u64) = undefined;
 export var tlbShootdownPageCount: Volatile(u64) = undefined;
-
+export var timeStampCounterSynchronizationValue = Volatile(u64){ .value = 0 };
 const invalidateAllPagesThreshold = 1024;
 
 pub fn initThread(
@@ -173,87 +173,104 @@ const Commit = extern struct {
     const L2_COMMIT_SIZE = 1 << 14;
     const L3_COMMIT_SIZE = 1 << 5;
 };
+
 export fn InterruptHandler(ctx: *InterruptContext) callconv(.C) void {
     if (kernel.scheduler.panic.readVolatile() and ctx.intNum != 2) return;
     if (areInterruptsEnabled()) std.debug.panic("interrupts were enabled at the start of the interrupt handler", .{});
 
     const interrupt = ctx.intNum;
-    var maybeLS = getLocalStorage();
+    const maybeLS = getLocalStorage();
     if (maybeLS) |ls| {
         if (ls.currentThread) |currentThread| currentThread.lastInterruptTicks = ProcessorReadTimeStamp();
         if (ls.spinlockCount != 0 and ctx.cr8 != 0xe) std.debug.panic("spinlock count is not zero", .{});
     }
 
     if (interrupt < 0x20) {
-        if (interrupt == 2) {
-            maybeLS.?.panicCtx = ctx;
-            halt();
-        }
-
-        const supervisor = ctx.cs & 3 == 0;
-
-        if (!supervisor) {
-            if (ctx.cs != 0x5b and ctx.cs != 0x6b) std.debug.panic("Invalid CS", .{});
-            const currentThread = getCurrentThread().?;
-            if (currentThread.isKernelThread) std.debug.panic("Kernel thread is executing user code", .{});
-            const prevTerminatableState = currentThread.terminatableState.readVolatile();
-            currentThread.terminatableState.writeVolatile(.inSysCall);
-
-            if (maybeLS) |ls| if (ls.spinlockCount != 0) std.debug.panic("user exception occurred with spinlock acquired", .{});
-
-            enableInterrupts();
-            maybeLS = null;
-            if ((interrupt == 14 and !handlePageFault(ctx.cr2, if (ctx.errorCode & 2 != 0) memory.HandlePageFaultFlags.fromFlag(.write) else memory.handlePageFaultFlags.empty())) or interrupt != 14) {
-                const rbp = ctx.rbp;
-                const traceDepth: u32 = 0;
-                while (rbp != 0 and traceDepth < 32) {
-                    if (!MMArchIsBufferInUserRange(rbp, 16)) break;
-                    var val: u64 = 0;
-                    if (!MMArchSafeCopy(@intFromPtr(&val), rbp + 8, @sizeOf(u64))) break;
-                    if (val == 0) break;
-                    if (!MMArchSafeCopy(@intFromPtr(&rbp), rbp, @sizeOf(u64))) break;
-                }
-
-                var crashReason = zeroes(kernel.CrashReason);
-                crashReason.errorCode = kernel.FatalError.processorException;
-                crashReason.duringSysCall = -1;
-                currentThread.process.?.crash(&crashReason);
-            }
-
-            if (currentThread.terminatableState.readVolatile() != .inSysCall) std.debug.panic("Thread changed terminatable state during interrupt", .{});
-
-            currentThread.terminatableState.writeVolatile(prevTerminatableState);
-            if (currentThread.terminating.readVolatile() or currentThread.paused.readVolatile()) fakeTimerInterrupt();
-            disableInterrupts();
-        } else {
-            if (ctx.cs != 0x48) std.debug.panic("Invalid CS", .{});
-            if (interrupt == 14) {
-                if (ctx.errorCode & (1 << 3) != 0) std.debug.panic("unresolvable page fault", .{});
-
-                if (maybeLS) |local| if (local.spinlockCount != 0 and (ctx.cr2 >= 0xFFFF900000000000 and ctx.cr2 < 0xFFFFF00000000000)) std.debug.panic("page fault occurred with spinlocks active", .{});
-
-                if (ctx.fxsave & 0x200 != 0 and ctx.cr8 != 0xe) {
-                    enableInterrupts();
-                    maybeLS = null;
-                }
-
-                const res = handlePageFault(ctx.cr2, (if (ctx.errorCode & 2 != 0) memory.HandlePageFaultFlags.fromFlag(.write) else memory.HandlePageFaultFlags.empty()).orFlag(.forSupervisor));
-                var safeCopy = false;
-                if (!res) {
-                    if (getCurrentThread().?.inSafeCopy and ctx.cr2 < 0x8000000000000000) {
-                        safeCopy = true;
-                        ctx.rip = ctx.r8;
-                    }
-                }
-
-                if (res or safeCopy) disableInterrupts() else std.debug.panic("Unhandleable page fault", .{});
-            } else {
-                std.debug.panic("Unable to resolve exception", .{});
-            }
-        }
+        handleException(ctx, maybeLS);
     } else if ((interrupt == 0xFF) or (interrupt >= 0x20 and interrupt < 0x30) or (interrupt >= 0xF0 and interrupt < 0xFE)) {
         std.debug.panic("Not implemented", .{});
     }
+}
+
+fn handleException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
+    if (ctx.intNum == 2) {
+        maybeLS.?.panicCtx = ctx;
+        halt();
+    }
+
+    const supervisor = ctx.cs & 3 == 0;
+
+    if (!supervisor) {
+        handleUserException(ctx, maybeLS);
+    } else {
+        handleKernelException(ctx, maybeLS);
+    }
+}
+
+fn handleUserException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
+    if (ctx.cs != 0x5b and ctx.cs != 0x6b) std.debug.panic("Invalid CS", .{});
+    const currentThread = getCurrentThread().?;
+    if (currentThread.isKernelThread) std.debug.panic("Kernel thread is executing user code", .{});
+    const prevTerminatableState = currentThread.terminatableState.readVolatile();
+    currentThread.terminatableState.writeVolatile(.inSysCall);
+
+    if (maybeLS) |ls| if (ls.spinlockCount != 0) std.debug.panic("user exception occurred with spinlock acquired", .{});
+
+    enableInterrupts();
+    maybeLS = null;
+    if ((ctx.intNum == 14 and !handlePageFault(ctx.cr2, if (ctx.errorCode & 2 != 0) memory.HandlePageFaultFlags.fromFlag(.write) else memory.handlePageFaultFlags.empty())) or ctx.intNum != 14) {
+        handleCrash(ctx, currentThread);
+    }
+
+    if (currentThread.terminatableState.readVolatile() != .inSysCall) std.debug.panic("Thread changed terminatable state during interrupt", .{});
+
+    currentThread.terminatableState.writeVolatile(prevTerminatableState);
+    if (currentThread.terminating.readVolatile() or currentThread.paused.readVolatile()) fakeTimerInterrupt();
+    disableInterrupts();
+}
+
+fn handleKernelException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
+    if (ctx.cs != 0x48) std.debug.panic("Invalid CS", .{});
+    if (ctx.intNum == 14) {
+        if (ctx.errorCode & (1 << 3) != 0) std.debug.panic("unresolvable page fault", .{});
+
+        if (maybeLS) |local| if (local.spinlockCount != 0 and (ctx.cr2 >= 0xFFFF900000000000 and ctx.cr2 < 0xFFFFF00000000000)) std.debug.panic("page fault occurred with spinlocks active", .{});
+
+        if (ctx.fxsave & 0x200 != 0 and ctx.cr8 != 0xe) {
+            enableInterrupts();
+            maybeLS = null;
+        }
+
+        const res = handlePageFault(ctx.cr2, (if (ctx.errorCode & 2 != 0) memory.HandlePageFaultFlags.fromFlag(.write) else memory.HandlePageFaultFlags.empty()).orFlag(.forSupervisor));
+        var safeCopy = false;
+        if (!res) {
+            if (getCurrentThread().?.inSafeCopy and ctx.cr2 < 0x8000000000000000) {
+                safeCopy = true;
+                ctx.rip = ctx.r8;
+            }
+        }
+
+        if (res or safeCopy) disableInterrupts() else std.debug.panic("Unhandleable page fault", .{});
+    } else {
+        std.debug.panic("Unable to resolve exception", .{});
+    }
+}
+
+fn handleCrash(ctx: *InterruptContext, currentThread: *Thread) void {
+    const rbp = ctx.rbp;
+    const traceDepth: u32 = 0;
+    while (rbp != 0 and traceDepth < 32) {
+        if (!MMArchIsBufferInUserRange(rbp, 16)) break;
+        var val: u64 = 0;
+        if (!MMArchSafeCopy(@intFromPtr(&val), rbp + 8, @sizeOf(u64))) break;
+        if (val == 0) break;
+        if (!MMArchSafeCopy(@intFromPtr(&rbp), rbp, @sizeOf(u64))) break;
+    }
+
+    var crashReason = zeroes(kernel.CrashReason);
+    crashReason.errorCode = kernel.FatalError.processorException;
+    crashReason.duringSysCall = -1;
+    currentThread.process.?.crash(&crashReason);
 }
 
 fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
@@ -317,7 +334,6 @@ fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
         }
     };
 }
-//This is currently not fully implemented, acts as a placeHolder
 pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlags) bool {
     const va = faultyAddr & ~@as(u64, pageSize - 1);
     const forSupervisor = flags.contains(.forSupervisor);
@@ -616,13 +632,12 @@ pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
     memory.decommit(space.arch.commitedPagePerTable * pageSize, true);
 }
 
-//TODO!: implement
 pub export fn getTimeMS() callconv(.C) u64 {}
-//TODO!: complete implementation later
+
 pub export fn nextTimer(ms: u64) callconv(.C) void {
-    _ = ms;
     while (!kernel.scheduler.started.readVolatile()) {}
     getLocalStorage().?.isSchedulerReady = true;
+    LAPIC.nextTimer(ms);
 }
 
 export fn MMArchInvalidatePages(startVA: u64, pageCount: u64) callconv(.C) void {
@@ -812,4 +827,18 @@ pub export fn commitPageTables(space: *memory.AddressSpace, region: *memory.Regi
     }
 
     return true;
+}
+
+pub export fn translateAddr(va: u64, hasWriteAccess: bool) callconv(.C) u64 {
+    const addr = va & 0x0000FFFFFFFFF000;
+    const indices = PageTables.computeIndices(addr);
+    if (PageTables.access(.level4, indices).* & 1 == 0) return 0;
+    if (PageTables.access(.level3, indices).* & 1 == 0) return 0;
+    if (PageTables.access(.level2, indices).* & 1 == 0) return 0;
+
+    const pa = PageTables.access(.level1, indices).*;
+
+    if (hasWriteAccess and pa & 2 == 0) return 0;
+    if (pa & 1 == 0) return 0;
+    return pa & 0x0000FFFFFFFFF000;
 }
