@@ -468,7 +468,7 @@ pub const AddressSpace = extern struct {
 
                 return null;
             } else if (forcedAddr != 0) {
-                if (space.usedRegions.find(forcedAddr, .exact)) |_| return null;
+                if (space.usedRegions.find(forcedAddr, .Exact)) |_| return null;
 
                 if (space.usedRegions.find(forcedAddr, .SmallestAboveOrEqual)) |item| {
                     if (item.value.?.descriptor.baseAddr < forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize) return null;
@@ -478,7 +478,7 @@ pub const AddressSpace = extern struct {
                     if (item.value.?.descriptor.baseAddr + item.value.?.descriptor.pageCount * pageSize > forcedAddr) return null;
                 }
 
-                if (space.freeRegionBase.find(forcedAddr, .exact)) |_| return null;
+                if (space.freeRegionBase.find(forcedAddr, .Exact)) |_| return null;
 
                 if (space.freeRegionBase.find(forcedAddr, .SmallestAboveOrEqual)) |item| {
                     if (item.value.?.descriptor.baseAddr < forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize) return null;
