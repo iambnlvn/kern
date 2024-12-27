@@ -732,3 +732,84 @@ fn ArchCallFunctionOnAllProcessors(cb: CallFunctionOnAllProcessorsCallback, incl
 
     if (includeThisProc) cb();
 }
+
+fn calculateNeeded(base: u64, end: u64, shifter: u64, commitArray: []const u8) u64 {
+    var neededCount: u64 = 0;
+    var i = base;
+
+    const bitMask: u8 = 1;
+    while (i < end) {
+        const index = i >> shifter;
+        if (commitArray[index >> 3] & (bitMask << @as(u3, @truncate(index & 0b111))) == 0) {
+            neededCount += 1;
+        }
+        i += 1 << shifter;
+    }
+
+    return neededCount;
+}
+
+fn markCommitted(base: u64, end: u64, shifter: u64, commitArray: []u8) void {
+    var i = base;
+    const bitMask: u8 = 1;
+    while (i < end) {
+        const index = i >> shifter;
+        commitArray[index >> 3] |= bitMask << @as(u3, @truncate(index & 0b111));
+        i += 1 << shifter;
+    }
+}
+
+pub export fn commitPageTables(space: *memory.AddressSpace, region: *memory.Region) callconv(.C) bool {
+    _ = space.reserveMutex.assertLocked();
+
+    const base = (region.descriptor.baseAddr - @as(u64, if (space == &kernel.coreAddressSpace) coreAddrSpaceStart else 0)) & 0x7FFFFFFFF000;
+    const end = base + (region.descriptor.pageCount << pageBitCount);
+    var needed: u64 = 0;
+
+    // Calculate needed pages for L3 and L2 tables
+    needed += calculateNeeded(base, end, pageBitCount + entryPerPageTableBitCount * 3, space.arch.commit.L3);
+    needed += calculateNeeded(base, end, pageBitCount + entryPerPageTableBitCount * 2, space.arch.commit.L2);
+
+    // Calculate needed pages for L1 tables
+    var prevIdxL2i: u64 = std.math.maxInt(u64);
+    var i = base;
+    const l1Shifter: u64 = pageBitCount + entryPerPageTableBitCount;
+    while (i < end) {
+        const index = i >> l1Shifter;
+        const idxL2i = index >> 15;
+
+        if (space.arch.commit.commitL1[idxL2i >> 3] & (1 << @as(u3, @truncate(idxL2i & 0b111))) == 0) {
+            needed += if (prevIdxL2i != idxL2i) 2 else 1;
+        } else {
+            if (space.arch.commit.L1[index >> 3] & (1 << @as(u3, @truncate(index & 0b111))) == 0) {
+                needed += 1;
+            }
+        }
+
+        prevIdxL2i = idxL2i;
+        i += 1 << l1Shifter;
+    }
+
+    // Commit memory if needed
+    if (needed != 0) {
+        if (!memory.commit(needed * pageSize, true)) {
+            return false;
+        }
+        space.arch.commitedPagePerTable += needed;
+    }
+
+    // Mark pages as committed for L3, L2, and L1 tables
+    markCommitted(base, end, pageBitCount + entryPerPageTableBitCount * 3, space.arch.commit.L3);
+    markCommitted(base, end, pageBitCount + entryPerPageTableBitCount * 2, space.arch.commit.L2);
+
+    i = base;
+    while (i < end) {
+        const index = i >> l1Shifter;
+        const idxL2i = index >> 15;
+        space.arch.commit.commitL1[idxL2i >> 3] |= 1 << @as(u3, @truncate(idxL2i & 0b111));
+        space.arch.commit.L1[index >> 3] |= 1 << @as(u3, @truncate(index & 0b111));
+        i += 1 << l1Shifter;
+    }
+
+    return true;
+}
