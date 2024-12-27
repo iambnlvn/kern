@@ -314,6 +314,146 @@ pub const AddressSpace = extern struct {
             _ = space.freeRegionSize.insert(&region.u.item.u.size, region, region.descriptor.pageCount, .allow);
         }
     }
+
+    pub fn reserve(space: *AddressSpace, byteCount: u64, flags: Region.Flags, forcedAddr: u64) callconv(.C) ?*Region {
+        const requiredPageCount = ((byteCount + pageSize - 1) & ~@as(u64, pageSize - 1)) / pageSize;
+        if (requiredPageCount == 0) return null;
+
+        space.reserveMutex.assertLocked();
+        const guardPageCount = 1; // Number of guard pages to allocate on each side
+        const region = blk: {
+            if (space == &kernel.coreAddressSpace) {
+                if (kernel.mmCoreRegionCount == arch.coreMemRegionCount) return null;
+
+                if (forcedAddr != 0) std.debug.panic("Using a forced address in core address space\n", .{});
+
+                {
+                    const newRegionCount = kernel.mmCoreRegionCount + 1;
+                    const requiredCommitPgaeCount = newRegionCount * @sizeOf(Region) / pageSize;
+
+                    while (kernel.mmCoreRegionArrayCommit < requiredCommitPgaeCount) : (kernel.mmCoreRegionArrayCommit += 1) {
+                        if (!commit(pageSize, true)) return null;
+                    }
+                }
+
+                for (kernel.mmCoreRegions[0..kernel.mmCoreRegionCount]) |*region| {
+                    if (!region.u.core.used and region.descriptor.pageCount >= requiredPageCount) {
+                        if (region.descriptor.pageCount > requiredPageCount) {
+                            const last = kernel.mmCoreRegionCount;
+                            kernel.mmCoreRegionCount += 1;
+                            var split = &kernel.mmCoreRegions[last];
+                            split.* = region.*;
+                            split.descriptor.baseAddr += requiredPageCount * pageSize;
+                            split.descriptor.pageCount -= requiredPageCount;
+                        }
+
+                        region.u.core.used = true;
+                        region.descriptor.pageCount = requiredPageCount;
+                        region.flags = flags;
+                        region.data = kernel.zeroes(@TypeOf(region.data));
+
+                        break :blk region;
+                    }
+                }
+
+                return null;
+            } else if (forcedAddr != 0) {
+                if (space.usedRegions.find(forcedAddr, .exact)) |_| return null;
+
+                if (space.usedRegions.find(forcedAddr, .SmallestAboveOrEqual)) |item| {
+                    if (item.value.?.descriptor.baseAddr < forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize) return null;
+                }
+
+                if (space.usedRegions.find(forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize - 1, .LargestBelowOrEqual)) |item| {
+                    if (item.value.?.descriptor.baseAddr + item.value.?.descriptor.pageCount * pageSize > forcedAddr) return null;
+                }
+
+                if (space.freeRegionBase.find(forcedAddr, .exact)) |_| return null;
+
+                if (space.freeRegionBase.find(forcedAddr, .SmallestAboveOrEqual)) |item| {
+                    if (item.value.?.descriptor.baseAddr < forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize) return null;
+                }
+
+                if (space.freeRegionBase.find(forcedAddr + (requiredPageCount + 2 * guardPageCount) * pageSize - 1, .LargestBelowOrEqual)) |item| {
+                    if (item.value.?.descriptor.baseAddr + item.value.?.descriptor.pageCount * pageSize > forcedAddr) return null;
+                }
+
+                const region = @as(?*Region, @ptrFromInt(EsHeapAllocate(@sizeOf(Region), true, &kernel.heapCore))) orelse unreachable;
+                region.descriptor.baseAddr = forcedAddr + guardPageCount * pageSize;
+                region.descriptor.pageCount = requiredPageCount;
+                region.flags = flags;
+
+                _ = space.usedRegions.insert(&region.u.item.base, region, region.descriptor.baseAddr, .panic);
+
+                region.data = kernel.zeroes(@TypeOf(region.data));
+                break :blk region;
+            } else {
+                if (space.freeRegionSize.find(requiredPageCount + 2 * guardPageCount, .SmallestAboveOrEqual)) |item| {
+                    const region = item.value.?;
+                    space.freeRegionBase.remove(&region.u.item.base);
+                    space.freeRegionSize.remove(&region.u.item.u.size);
+
+                    if (region.descriptor.pageCount > requiredPageCount + 2 * guardPageCount) {
+                        const split = @as(?*Region, @ptrFromInt(EsHeapAllocate(@sizeOf(Region), true, &kernel.heapCore))) orelse unreachable;
+                        split.* = region.*;
+
+                        split.descriptor.baseAddr += (requiredPageCount + 2 * guardPageCount) * pageSize;
+                        split.descriptor.pageCount -= requiredPageCount + 2 * guardPageCount;
+
+                        space.freeRegionBase.insert(&split.u.item.base, split, split.descriptor.baseAddr, .panic);
+                        space.freeRegionSize.insert(&split.u.item.u.size, split, split.descriptor.pageCount, .panic);
+                    }
+
+                    region.descriptor.pageCount = requiredPageCount;
+                    region.descriptor.baseAddr += guardPageCount * pageSize;
+
+                    _ = space.usedRegions.insert(&region.u.item.base, region, region.descriptor.baseAddr, .panic);
+
+                    region.data = kernel.zeroes(@TypeOf(region.data));
+                    break :blk region;
+                } else {
+                    return null;
+                }
+            }
+        };
+
+        if (!arch.commitPageTables(space, region)) {
+            space.unreserve(region, false, false);
+            return null;
+        }
+
+        if (space != &kernel.coreAddressSpace) {
+            region.u.item.u.nonGuard = kernel.zeroes(@TypeOf(region.u.item.u.nonGuard));
+            region.u.item.u.nonGuard.value = region;
+            space.usedRegionsNonGuard.append(&region.u.item.u.nonGuard);
+        }
+
+        space.reserveCount += requiredPageCount;
+
+        return region;
+    }
+
+    pub fn mapPhysical(space: *AddressSpace, askedOffset: u64, askedByteCount: u64, caching: Region.Flags) callconv(.C) u64 {
+        const offset2 = askedOffset & (pageSize - 1);
+        const offset = askedOffset - offset2;
+        const byteCount = if (offset2 != 0) askedByteCount + pageSize else askedByteCount;
+
+        const region = blk: {
+            _ = space.reserveMutex.acquire();
+            defer space.reserveMutex.release();
+
+            const result = space.reserve(byteCount, caching.orFlag(.fixed).orFlag(.physical), 0) orelse return 0;
+            result.data.u.physical.offset = offset;
+            break :blk result;
+        };
+
+        var i: u64 = 0;
+        while (i < region.descriptor.pageCount) : (i += 1) {
+            _ = space.handle_page_fault(region.descriptor.baseAddr + i * pageSize, HandlePageFaultFlags.empty());
+        }
+
+        return region.descriptor.baseAddr + offset2;
+    }
 };
 
 pub fn decommit(byteCount: u64, fixed: bool) callconv(.C) void {
@@ -1219,4 +1359,8 @@ pub fn physicalInsertFreePagesNext(page: u64) callconv(.C) void {
 export fn MMPhysicalInsertFreePagesEnd() callconv(.C) void {
     if (kernel.physicalMemoryManager.freePageCount > Physical.Allocator.zeroPageThreshold) _ = kernel.physicalMemoryManager.zeroPageEvent.set(true);
     MMUpdateAvailablePageCount(true);
+}
+
+export fn EsHeapAllocate(size: u64, isZero: bool, heap: *Heap) callconv(.C) u64 {
+    return heap.alloc(size, isZero);
 }
