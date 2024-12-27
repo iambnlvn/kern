@@ -16,7 +16,9 @@ const arch = @import("./arch/x86_64.zig");
 pub const Thread = extern struct {
     inSafeCopy: bool,
     item: LinkedList(Thread).Node,
+    allItems: LinkedList(Thread).Node,
     procItem: LinkedList(Process).Node,
+
     process: *Process,
     id: u64,
     execProcId: u32,
@@ -39,17 +41,20 @@ pub const Thread = extern struct {
     type: Thread.Type,
     priority: i8,
     blockedThreadPriorities: [Thread.priorityCount]i32,
-    policy: Thread.Policy,
-    affinity: u32,
-    state: Volatile(Thread.state),
+    // policy: Policy,
+    // affinity: u32,
+    state: Volatile(Thread.State),
     terminatableState: Volatile(Thread.TerminatableState),
     terminating: Volatile(bool),
     executing: Volatile(bool),
     paused: Volatile(bool),
     yieldIpiReceived: Volatile(bool),
+
     tempAddrSpace: ?*volatile memory.AddressSpace,
     interruptCtx: ?*arch.InterruptContext,
+    lastKnowExecAddr: u64,
     killAsyncTask: AsyncTask,
+
     blocking: extern union {
         mutex: ?*volatile Mutex,
         writer: extern struct {
@@ -84,7 +89,7 @@ pub const Thread = extern struct {
         idle,
     });
 
-    pub const state = enum(i8) {
+    pub const State = enum(i8) {
         active = 0,
         waitingMutex = 1,
         waitingEvent,
@@ -98,14 +103,14 @@ pub const Thread = extern struct {
         userBlockRequest,
     };
 
-    pub const Policy = enum {
-        FIFO,
-        RoundRobin,
-        Other,
-        Batch,
-        Idle,
-        Deadline,
-    };
+    // pub const Policy = enum(u16) {
+    //     FIFO,
+    //     RoundRobin,
+    //     Other,
+    //     Batch,
+    //     Idle,
+    //     Deadline,
+    // };
 };
 
 pub const Node = extern struct {
@@ -124,7 +129,7 @@ pub const Process = extern struct {
     threads: LinkedList(Thread),
     threadsMutex: Mutex,
     execNode: ?*Node,
-    execName: ?[32]u8,
+    execName: ?*const [32]u8,
     data: ProcCreateData,
     permissions: Process.Permission,
     creationFlags: Process.CreationFlags,
