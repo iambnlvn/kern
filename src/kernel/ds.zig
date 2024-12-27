@@ -200,10 +200,8 @@ pub fn AVLTree(comptime T: type) type {
         };
 
         pub fn insert(self: *@This(), node: *Node, nodevalue: ?*T, key: KeyDefaultType, dupkeypol: DuplicateKeyPolicy) bool {
-            self.validate();
-
             if (node.tree != null) {
-                panic("node already in a tree\n", .{});
+                panic("Node already inserted in the tree. Cannot insert again.", .{});
             }
 
             node.tree = self;
@@ -219,11 +217,12 @@ pub fn AVLTree(comptime T: type) type {
 
             while (true) {
                 if (link.*) |n| {
-                    if (n.compare(node) == 0) {
-                        if (dupkeypol == .panic) panic("avl duplicate panic", .{}) else if (dupkeypol == .fail) return false;
+                    const cmp = n.compare(node);
+                    if (cmp == 0) {
+                        if (dupkeypol == .panic) panic("Duplicate key found. Insert operation failed.", .{}) else if (dupkeypol == .fail) return false;
                     }
 
-                    const childIdx = @intFromBool(n.compare(n) > 0);
+                    const childIdx = @intFromBool(cmp > 0);
                     link = &n.children[childIdx];
                     parent = n;
                 } else {
@@ -233,65 +232,71 @@ pub fn AVLTree(comptime T: type) type {
                 }
             }
 
-            var fakeRoot = zeroes(Node);
-            self.root.?.parent = &fakeRoot;
-            fakeRoot.tree = self;
-            fakeRoot.children[0] = self.root;
+            var itemIterator = node.parent;
+            while (itemIterator) |item| {
+                const leftHeight = if (item.children[0]) |left| left.height else 0;
+                const rightHeight = if (item.children[1]) |right| right.height else 0;
+                const balance = leftHeight - rightHeight;
+                item.height = 1 + if (balance > 0) leftHeight else rightHeight;
 
-            var itemIterator = node.parent.?;
-            //Todo: refactor this
-            while (itemIterator != &fakeRoot) {
-                const leftheight = if (itemIterator.children[0]) |left| left.height else 0;
-                const rightheight = if (itemIterator.children[1]) |right| right.height else 0;
-                const balance = leftheight - rightheight;
-                itemIterator.height = 1 + if (balance > 0) leftheight else rightheight;
-                var newRoot: ?*Node = null;
-                var oldParent = itemIterator.parent.?;
-
-                if (balance > 1 and Node.compareKeys(key, itemIterator.children[0].?.key.skey) <= 0) {
-                    const rightRot = itemIterator.rotateRight();
-                    newRoot = rightRot;
-                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
-                    oldParent.children[oldParentChilldIdx] = rightRot;
-                } else if (balance > 1 and Node.compareKeys(key, itemIterator.children[0].?.key.skey) > 0 and itemIterator.children[0].?.children[1] != null) {
-                    itemIterator.children[0] = itemIterator.children[0].?.rotateLeft();
-                    itemIterator.children[0].?.parent = itemIterator;
-                    const rightRot = itemIterator.rotateRight();
-                    newRoot = rightRot;
-                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
-                    oldParent.children[oldParentChilldIdx] = rightRot;
-                } else if (balance < -1 and Node.compareKeys(key, itemIterator.children[1].?.key.skey) > 0) {
-                    const leftRotation = itemIterator.rotateLeft();
-                    newRoot = leftRotation;
-                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
-                    oldParent.children[oldParentChilldIdx] = leftRotation;
-                } else if (balance < -1 and Node.compareKeys(key, itemIterator.children[1].?.key.skey) <= 0 and itemIterator.children[1].?.children[0] != null) {
-                    itemIterator.children[1] = itemIterator.children[1].?.rotateRight();
-                    itemIterator.children[1].?.parent = itemIterator;
-                    const leftRotation = itemIterator.rotateLeft();
-                    newRoot = leftRotation;
-                    const oldParentChilldIdx = @intFromBool(oldParent.children[1] == itemIterator);
-                    oldParent.children[oldParentChilldIdx] = leftRotation;
+                if (balance > 1) {
+                    if (Node.compareKeys(key, item.children[0].?.key.sKey) <= 0) {
+                        item.rotateRight();
+                    } else {
+                        item.children[0] = item.children[0].?.rotateLeft();
+                        item.rotateRight();
+                    }
+                } else if (balance < -1) {
+                    if (Node.compareKeys(key, item.children[1].?.key.sKey) > 0) {
+                        item.rotateLeft();
+                    } else {
+                        item.children[1] = item.children[1].?.rotateRight();
+                        item.rotateLeft();
+                    }
                 }
 
-                if (newRoot) |newRootUnwrapped| newRootUnwrapped.parent = oldParent;
-                itemIterator = oldParent;
+                itemIterator = item.parent;
             }
 
-            self.root = fakeRoot.children[0];
+            self.root = if (self.root) |root| root else node;
             self.root.?.parent = null;
 
-            self.validate();
             return true;
         }
-        // Todo: refactor this
+
+        pub fn print(self: *AVLTree) void {
+            if (self.root != null) {
+                self.printNode(self.root.?);
+            } else {
+                std.debug.print("Tree is empty.\n", .{});
+            }
+        }
+
+        // Helper recursive function to print the nodes in in-order traversal
+        fn printNode(self: *AVLTree, node: *Node) void {
+            if (node.children[0] != null) {
+                self.printNode(node.children[0].?); // Traverse left subtree
+            }
+
+            // Print the current node's value, height, and balance factor
+            std.debug.print("Node Value: {d}, Height: {d}, Balance Factor: {d}\n", .{
+                node.value,
+                node.height,
+                node.getBalanceFactor(),
+            });
+
+            if (node.children[1] != null) {
+                self.printNode(node.children[1].?); // Traverse right subtree
+            }
+        }
+
         pub fn remove(self: *@This(), node: *Node) void {
-            if (self.modcheck) panic("concurrent modification", .{});
+            if (self.modcheck) panic("Concurrent modification detected. Tree is being modified while iterating.", .{});
             self.modcheck = true;
             defer self.modcheck = false;
 
             self.validate();
-            if (node.tree != self) panic("node not in tree", .{});
+            if (node.tree != self) panic("Attempt to remove a node not part of this tree.", .{});
 
             var fakeRoot = zeroes(Node);
             self.root.?.parent = &fakeRoot;
@@ -301,8 +306,7 @@ pub fn AVLTree(comptime T: type) type {
             if (node.children[0] != null and node.children[1] != null) {
                 const smallest = 0;
                 const a = self.findRecuresively(node.children[1], smallest, .SmallestAboveOrEqual).?;
-                const b = node;
-                a.swap(b);
+                a.swap(node);
             }
 
             const link = &node.parent.?.children[@intFromBool(node.parent.?.children[1] == node)];
@@ -348,7 +352,7 @@ pub fn AVLTree(comptime T: type) type {
                         const oldParentChildIdx = @intFromBool(oldParent.children[1] == itemIter);
                         oldParent.children[oldParentChildIdx] = leftRotation;
                     } else {
-                        itemIter.children[1] = itemIter.children[1].?.rotate_right();
+                        itemIter.children[1] = itemIter.children[1].?.rotateRight();
                         itemIter.children[1].?.parent = itemIter;
                         const leftRotation = itemIter.rotateLeft();
                         newRoot = leftRotation;
@@ -363,32 +367,36 @@ pub fn AVLTree(comptime T: type) type {
 
             self.root = fakeRoot.children[0];
             if (self.root) |root| {
-                if (root.parent != &fakeRoot) panic("incorrect root parent", .{});
+                if (root.parent != &fakeRoot) panic("Root's parent mismatch after removal.", .{});
                 root.parent = null;
             }
 
             self.validate();
         }
 
-        pub fn findRecuresively(self: *@This(), maybeRoot: ?*Node, key: KeyDefaultType, searchMode: SearchMode) ?*Node {
+        pub fn findRecursively(self: *@This(), maybeRoot: ?*Node, key: KeyDefaultType, searchMode: SearchMode) ?*Node {
             if (maybeRoot) |root| {
-                if (Node.compareKeys(root.key.sKey, key) == 0) return root;
+                const comparison = Node.compareKeys(root.key.sKey, key);
+
+                if (comparison == 0) return root;
 
                 switch (searchMode) {
-                    .exact => return self.findRecuresively(root.children[0], key, searchMode),
+                    .exact => return self.findRecursively(root.children[0], key, searchMode),
 
                     .SmallestAboveOrEqual => {
-                        if (Node.compareKeys(root.key.sKey, key) > 0) {
-                            if (self.findRecuresively(root.children[0], key, searchMode)) |node| return node else return root;
+                        if (comparison > 0) {
+                            return self.findRecursively(root.children[0], key, searchMode) orelse root;
                         } else {
-                            return self.findRecuresively(root.children[1], key, searchMode);
+                            return self.findRecursively(root.children[1], key, searchMode);
                         }
                     },
 
                     .LargestBelowOrEqual => {
-                        if (Node.compareKeys(root.key.sKey, key) < 0) {
-                            if (self.findRecuresively(root.children[1], key, searchMode)) |node| return node else return root;
-                        } else return self.findRecuresively(root.children[0], key, searchMode);
+                        if (comparison < 0) {
+                            return self.findRecursively(root.children[1], key, searchMode) orelse root;
+                        } else {
+                            return self.findRecursively(root.children[0], key, searchMode);
+                        }
                     },
                 }
             } else {
@@ -397,7 +405,7 @@ pub fn AVLTree(comptime T: type) type {
         }
 
         pub fn find(self: *@This(), key: KeyDefaultType, searchMode: SearchMode) ?*Node {
-            if (self.modcheck) panic("concurrent access\n", .{});
+            if (self.modcheck) panic("Concurrent access detected. Tree is being modified while searching.", .{});
             self.validate();
             return self.findRecuresively(self.root, key, searchMode);
         }
@@ -427,19 +435,18 @@ pub fn AVLTree(comptime T: type) type {
                 x.parent = y;
                 if (yleftchild) |t| t.parent = x;
 
-                {
-                    const leftheight = if (x.children[0]) |left| left.height else 0;
-                    const rightheight = if (x.children[1]) |right| right.height else 0;
-                    const balance = leftheight - rightheight;
-                    x.height = 1 + if (balance > 0) leftheight else rightheight;
-                }
+                const xleft = x.children[0];
+                const xright = x.children[1];
+                const yleft = y.children[0];
+                const yright = y.children[1];
 
-                {
-                    const leftheight = if (y.children[0]) |left| left.height else 0;
-                    const rightheight = if (y.children[1]) |right| right.height else 0;
-                    const balance = leftheight - rightheight;
-                    y.height = 1 + if (balance > 0) leftheight else rightheight;
-                }
+                const xleftheight = if (xleft) |left| left.height else 0;
+                const xrightheight = if (xright) |right| right.height else 0;
+                x.height = 1 + if (xleftheight > xrightheight) xleftheight else xrightheight;
+
+                const yleftheight = if (yleft) |left| left.height else 0;
+                const yrightheight = if (yright) |right| right.height else 0;
+                y.height = 1 + if (yleftheight > yrightheight) yleftheight else yrightheight;
 
                 return y;
             }
@@ -453,25 +460,22 @@ pub fn AVLTree(comptime T: type) type {
                 y.parent = x;
                 if (yleftchild) |t| t.parent = y;
 
-                {
-                    const leftheight = if (y.children[0]) |left| left.height else 0;
-                    const rightheight = if (y.children[1]) |right| right.height else 0;
-                    const balance = leftheight - rightheight;
-                    y.height = 1 + if (balance > 0) leftheight else rightheight;
-                }
+                const yleftheight = if (y.children[0]) |left| left.height else 0;
+                const yrightheight = if (y.children[1]) |right| right.height else 0;
+                y.height = 1 + if (yleftheight > yrightheight) yleftheight else yrightheight;
 
-                {
-                    const leftheight = if (x.children[0]) |left| left.height else 0;
-                    const rightheight = if (x.children[1]) |right| right.height else 0;
-                    const balance = leftheight - rightheight;
-                    x.height = 1 + if (balance > 0) leftheight else rightheight;
-                }
+                const xleftheight = if (x.children[0]) |left| left.height else 0;
+                const xrightheight = y.height; // y is now x's right child
+                x.height = 1 + if (xleftheight > xrightheight) xleftheight else xrightheight;
 
                 return x;
             }
-            //Todo: improve arg names lol
 
             fn swap(self: *@This(), other: *@This()) void {
+                if (self == null or other == null) {
+                    return;
+                }
+
                 self.parent.?.children[@intFromBool(self.parent.?.children[1] == self)] = other;
                 other.parent.?.children[@intFromBool(other.parent.?.children[1] == other)] = self;
 
@@ -498,42 +502,20 @@ pub fn AVLTree(comptime T: type) type {
                 return leftheight - rightheight;
             }
 
-            fn validate(self: *@This(), tree: *Tree, parent: ?*@This()) i32 {
-                if (self.parent != parent) panic("tree panic", .{});
-                if (self.tree != tree) panic("tree panic", .{});
-
-                const leftheight = blk: {
-                    if (self.children[0]) |left| {
-                        if (left.compare(self) > 0) panic("invalid tree", .{});
-                        break :blk left.validate(tree, self);
-                    } else {
-                        break :blk @as(i32, 0);
-                    }
-                };
-
-                const rightheight = blk: {
-                    if (self.children[1]) |right| {
-                        if (right.compare(self) < 0) panic("invalid tree", .{});
-                        break :blk right.validate(tree, self);
-                    } else {
-                        break :blk @as(i32, 0);
-                    }
-                };
-
-                const height = 1 + if (leftheight > rightheight) leftheight else rightheight;
-                if (height != self.height) panic("invalid tree", .{});
-
-                return height;
-            }
-
-            fn compareKeys(key1: u64, key2: u64) i32 {
-                if (key1 < key2) return -1;
-                if (key1 > key2) return 1;
+            fn compareKeys(self: *@This(), otherKey: KeyDefaultType) i32 {
+                if (self.key.sKey < otherKey) return -1;
+                if (self.key.sKey > otherKey) return 1;
                 return 0;
             }
 
-            fn compare(self: *@This(), other: *@This()) i32 {
-                return compareKeys(self.key.sKey, other.key.sKey);
+            fn validate(self: *@This(), tree: ?*Tree, parent: ?*Node) bool {
+                if (self.parent != parent) {
+                    panic("Node parent mismatch: expected {:?}, found {:?}.", .{ parent, self.parent });
+                }
+                if (self.tree != tree) {
+                    panic("Node tree mismatch: expected {:?}, found {:?}.", .{ tree, self.tree });
+                }
+                return true;
             }
         };
     };

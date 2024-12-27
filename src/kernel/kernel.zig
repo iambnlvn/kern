@@ -18,7 +18,7 @@ pub export var heapCore: Heap = undefined;
 pub export var heapFixed: Heap = undefined;
 pub export var physicalMemoryManager: memory.Physical.Allocator = undefined;
 pub export var globalData: *GlobalData = undefined;
-export var ipiLock: sync.SpinLock = undefined;
+pub export var ipiLock: sync.SpinLock = undefined;
 
 pub export var mmCoreRegionArrayCommit: u64 = 0;
 
