@@ -172,7 +172,7 @@ pub const Event = extern struct {
                 }
             }
 
-            arch.fakeTimeInterrupt();
+            arch.fakeTimerInterrupt();
         }
         return std.math.maxInt(u64);
     }
