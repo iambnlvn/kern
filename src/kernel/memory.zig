@@ -10,10 +10,10 @@ const AVLTree = kernel.ds.AVLTree;
 const LinkedList = kernel.ds.LinkedList;
 const Bitflag = kernel.ds.Bitflag;
 const Range = kernel.ds.Range;
-const AsyncTask = kernel.scheduling.AsyncTask;
+const AsyncTask = scheduling.AsyncTask;
 const List = kernel.ds.List;
-const arch = @import("./arch/x86_64.zig");
-const scheduling = @import("scheduling.zig");
+const arch = kernel.arch;
+const scheduling = kernel.scheduling;
 const Process = scheduling.Process;
 const Thread = scheduling.Thread;
 const pageSize = arch.pageSize;
@@ -317,18 +317,16 @@ pub const AddressSpace = extern struct {
 
         arch.freeAddressSpace(space);
     }
-
     pub fn unreserve(space: *AddressSpace, region: *Region, unmapPages: bool, isGuardRegion: bool) callconv(.C) void {
         space.reserveMutex.assertLocked();
 
         if (kernel.physicalMemoryManager.nextRegionToBalance == region) {
-            kernel.physicalMemoryManager.nextRegionToBalance = if (region.u.item.u.nonGuard.next) |next| next.value else null;
+            kernel.physicalMemoryManager.nextRegionToBalance = region.u.item.u.nonGuard.next orelse null;
             kernel.physicalMemoryManager.balanceResumePosition = 0;
         }
 
         if (region.flags.contains(.normal)) {
-            if (region.data.u.normal.guardBefore) |before| space.unreserve(before, false, true);
-            if (region.data.u.normal.guardAfter) |after| space.unreserve(after, false, true);
+            handleNormalRegion(space, region);
         } else if (region.flags.contains(.guard) and !isGuardRegion) {
             std.debug.panic("Cannot unreserve guard region", .{});
             return;
@@ -339,67 +337,91 @@ pub const AddressSpace = extern struct {
         }
 
         if (unmapPages) {
-            _ = arch.unMapPages(space, region.descriptor.baseAddr, region.descriptor.pageCount, UnmapPagesFlags.empty(), 0, null);
+            unmapRegionPages(space, region);
         }
 
         space.reserveCount += region.descriptor.pageCount;
 
         if (space == &kernel.coreAddressSpace) {
-            region.u.core.used = false;
-
-            var remove1: i64 = -1;
-            var remove2: i64 = -1;
-
-            for (kernel.mmCoreRegions[0..kernel.mmCoreRegionCount], 0..) |*r, i| {
-                if (!(remove1 != -1 or remove2 != 1)) break;
-                if (r.u.core.used) continue;
-                if (r == region) continue;
-
-                if (r.descriptor.baseAddr == region.descriptor.baseAddr + (region.descriptor.pageCount << pageBitCount)) {
-                    region.descriptor.pageCount += r.descriptor.pageCount;
-                    remove1 = @as(i64, @intCast(i));
-                } else if (region.descriptor.baseAddr == r.descriptor.baseAddr + (r.descriptor.pageCount << pageBitCount)) {
-                    region.descriptor.pageCount += r.descriptor.pageCount;
-                    region.descriptor.baseAddr = r.descriptor.baseAddr;
-                    remove2 = @as(i64, @intCast(i));
-                }
-            }
-
-            if (remove1 != -1) {
-                kernel.mmCoreRegionCount -= 1;
-                kernel.mmCoreRegions[@as(u64, @intCast(remove1))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
-                if (remove2 == @as(i64, @intCast(kernel.mmCoreRegionCount))) remove2 = remove1;
-            }
-
-            if (remove2 != -1) {
-                kernel.mmCoreRegionCount -= 1;
-                kernel.mmCoreRegions[@as(u64, @intCast(remove2))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
-            }
+            handleCoreRegion(space, region);
         } else {
-            space.usedRegions.remove(&region.u.item.base);
-            const address = region.descriptor.baseAddr;
+            handleNonCoreRegion(space, region);
+        }
+    }
 
-            if (space.freeRegionBase.find(address, .LargestBelowOrEqual)) |before| {
-                if (before.value.?.descriptor.baseAddr + before.value.?.descriptor.pageCount * pageSize == region.descriptor.baseAddr) {
-                    region.descriptor.baseAddr = before.value.?.descriptor.baseAddr;
-                    region.descriptor.pageCount += before.value.?.descriptor.pageCount;
-                    space.freeRegionBase.remove(before);
-                    space.freeRegionSize.remove(&before.value.?.u.item.u.size);
-                    EsHeapFree(@intFromPtr(before.value), @sizeOf(Region), &kernel.heapCore);
-                }
+    fn handleNormalRegion(space: *AddressSpace, region: *Region) void {
+        if (region.data.u.normal.guardBefore) |before| space.unreserve(before, false, true);
+        if (region.data.u.normal.guardAfter) |after| space.unreserve(after, false, true);
+    }
+
+    fn unmapRegionPages(space: *AddressSpace, region: *Region) void {
+        _ = arch.unMapPages(space, region.descriptor.baseAddr, region.descriptor.pageCount, UnmapPagesFlags.empty(), 0, null);
+    }
+
+    fn handleCoreRegion(region: *Region) void {
+        region.u.core.used = false;
+
+        var remove1: i64 = -1;
+        var remove2: i64 = -1;
+
+        for (kernel.mmCoreRegions[0..kernel.mmCoreRegionCount], 0..) |*r, i| {
+            if (!(remove1 != -1 or remove2 != 1)) break;
+            if (r.u.core.used) continue;
+            if (r == region) continue;
+
+            if (r.descriptor.baseAddr == region.descriptor.baseAddr + (region.descriptor.pageCount << pageBitCount)) {
+                region.descriptor.pageCount += r.descriptor.pageCount;
+                remove1 = @as(i64, @intCast(i));
+            } else if (region.descriptor.baseAddr == r.descriptor.baseAddr + (r.descriptor.pageCount << pageBitCount)) {
+                region.descriptor.pageCount += r.descriptor.pageCount;
+                region.descriptor.baseAddr = r.descriptor.baseAddr;
+                remove2 = @as(i64, @intCast(i));
             }
+        }
 
-            if (space.freeRegionBase.find(address, .SmallestAboveOrEqual)) |after| {
-                if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize == after.value.?.descriptor.baseAddr) {
-                    region.descriptor.pageCount += after.value.?.descriptor.pageCount;
-                    space.freeRegionBase.remove(after);
-                    space.freeRegionSize.remove(&after.value.?.u.item.u.size);
-                    EsHeapFree(@intFromPtr(after.value), @sizeOf(Region), &kernel.heapCore);
-                }
+        removeCoreRegion(remove1, remove2);
+    }
+
+    fn removeCoreRegion(remove1: i64, remove2: i64) void {
+        if (remove1 != -1) {
+            kernel.mmCoreRegionCount -= 1;
+            kernel.mmCoreRegions[@as(u64, @intCast(remove1))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
+            if (remove2 == @as(i64, @intCast(kernel.mmCoreRegionCount))) remove2 = remove1;
+        }
+
+        if (remove2 != -1) {
+            kernel.mmCoreRegionCount -= 1;
+            kernel.mmCoreRegions[@as(u64, @intCast(remove2))] = kernel.mmCoreRegions[kernel.mmCoreRegionCount];
+        }
+    }
+
+    fn handleNonCoreRegion(space: *AddressSpace, region: *Region) void {
+        space.usedRegions.remove(&region.u.item.base);
+        const address = region.descriptor.baseAddr;
+
+        mergeWithAdjacentFreeRegion(space, region, address);
+        _ = space.freeRegionBase.insert(&region.u.item.base, region, region.descriptor.baseAddr, .panic);
+        _ = space.freeRegionSize.insert(&region.u.item.u.size, region, region.descriptor.pageCount, .allow);
+    }
+
+    fn mergeWithAdjacentFreeRegion(space: *AddressSpace, region: *Region, address: u64) void {
+        if (space.freeRegionBase.find(address, .LargestBelowOrEqual)) |before| {
+            if (before.value.?.descriptor.baseAddr + before.value.?.descriptor.pageCount * pageSize == region.descriptor.baseAddr) {
+                region.descriptor.baseAddr = before.value.?.descriptor.baseAddr;
+                region.descriptor.pageCount += before.value.?.descriptor.pageCount;
+                space.freeRegionBase.remove(before);
+                space.freeRegionSize.remove(&before.value.?.u.item.u.size);
+                EsHeapFree(@intFromPtr(before.value), @sizeOf(Region), &kernel.heapCore);
             }
+        }
 
-            _ = space.freeRegionBase.insert(&region.u.item.base, region, region.descriptor.baseAddr, .panic);
-            _ = space.freeRegionSize.insert(&region.u.item.u.size, region, region.descriptor.pageCount, .allow);
+        if (space.freeRegionBase.find(address, .SmallestAboveOrEqual)) |after| {
+            if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize == after.value.?.descriptor.baseAddr) {
+                region.descriptor.pageCount += after.value.?.descriptor.pageCount;
+                space.freeRegionBase.remove(after);
+                space.freeRegionSize.remove(&after.value.?.u.item.u.size);
+                EsHeapFree(@intFromPtr(after.value), @sizeOf(Region), &kernel.heapCore);
+            }
         }
     }
 

@@ -541,9 +541,8 @@ pub export fn unMapPages(
             //TODO: implement balance file
         }
     }
-    //TODO!: invalide pages
 
-    // MMArchInvalidatePages(virtualAddrStart, pageCount);
+    MMArchInvalidatePages(virtualAddrStart, pageCount);
 }
 
 inline fn handleMissingPageTable(
