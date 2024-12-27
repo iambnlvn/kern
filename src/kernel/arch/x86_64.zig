@@ -145,7 +145,7 @@ const LocalStorage = extern struct {
     isSchedulerReady: bool,
     isInIRQ: bool,
     isInAsyncTask: bool,
-    processorID: 32,
+    processorID: u32,
     spinlockCount: u64,
     cpu: ?*CPU,
     asyncTaskList: List,
