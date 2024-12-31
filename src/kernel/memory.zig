@@ -159,6 +159,14 @@ pub const AddressSpace = extern struct {
         }
     }
 
+    pub fn closeRef(space: *AddressSpace) callconv(.C) void {
+        if (space == &kernel.addrSpace) return;
+        if (space.refCount.readVolatile() < 1) std.debug.panic("space has invalid reference count", .{});
+        if (space.refCount.atomicFetchSub(1) > 1) return;
+
+        space.removeAsyncTask.register(CloseReferenceTask);
+    }
+
     pub fn free(space: *AddressSpace, addr: u64, expectedSize: u64, userOnly: bool) callconv(.C) bool {
         _ = space.reserveMutex.acquire();
         defer space.reserveMutex.release();
@@ -559,13 +567,17 @@ pub const AddressSpace = extern struct {
 
         var i: u64 = 0;
         while (i < region.descriptor.pageCount) : (i += 1) {
-            _ = space.handle_page_fault(region.descriptor.baseAddr + i * pageSize, HandlePageFaultFlags.empty());
+            _ = space.handlePageFault(region.descriptor.baseAddr + i * pageSize, HandlePageFaultFlags.empty());
         }
 
         return region.descriptor.baseAddr + offset2;
     }
 };
 
+fn CloseReferenceTask(task: *AsyncTask) void {
+    const space = @as(AddressSpace, @fieldParentPtr("removeAsyncTask", task));
+    kernel.scheduler.addrSpacePool.remove(@intFromPtr(space));
+}
 pub fn decommit(byteCount: u64, fixed: bool) callconv(.C) void {
     if (byteCount & (pageSize - 1) != 0) {
         std.debug.panic("byte count not page-aligned", .{});

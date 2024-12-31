@@ -136,6 +136,8 @@ extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bo
 pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 pub extern fn out8(port: u16, value: u8) callconv(.C) void;
 pub extern fn in8(port: u16) callconv(.C) u8;
+pub extern fn setAddressSpace(AddressSpace: *memory.AddressSpace) callconv(.C) void;
+
 const LocalStorage = extern struct {
     currentThread: ?*Thread,
     idleThread: ?*Thread,
