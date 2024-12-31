@@ -102,6 +102,24 @@ pub const Thread = extern struct {
         inSysCall,
         userBlockRequest,
     };
+    pub fn remove(self: *@This()) void {
+        kernel.scheduler.threadPool.remove(@intFromPtr(self));
+    }
+
+    pub export fn setTemporaryAddressSpace(space: ?*memory.AddressSpace) callconv(.C) void {
+        kernel.scheduler.dispatchSpinLock.acquire();
+        const thread = arch.getCurrentThread().?;
+        const oldSpace = if (thread.tempAddrSpace) |tas| tas else &kernel.addrSpace;
+        thread.tempAddrSpace = space;
+        const newSpace = if (space) |sp| sp else &kernel.addrSpace;
+        newSpace.openRef();
+        newSpace.openRef();
+        arch.setAddressSpace(&newSpace.arch);
+        kernel.scheduler.dispatchSpinLock.release();
+
+        (@as(*memory.AddressSpace, @ptrCast(oldSpace))).closeRef();
+        (@as(*memory.AddressSpace, @ptrCast(oldSpace))).closeRef();
+    }
 
     // pub const Policy = enum(u16) {
     //     FIFO,
@@ -248,6 +266,8 @@ pub const Scheduler = extern struct {
     shutdown: Volatile(bool),
     timeMs: Volatile(u64),
     activeTimers: LinkedList(Timer),
+    threadPool: kernel.Pool,
+    addrSpacePool: kernel.Pool,
 
     pub fn notifyObject(
         self: *@This(),
