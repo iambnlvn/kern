@@ -203,3 +203,44 @@ pub const GlobalData = extern struct {
     keyboardLayoutVariantVersion: Volatile(u16),
     keyboardLayoutCountry: Volatile(u16),
 };
+
+pub const Pool = extern struct {
+    elementSize: u64,
+    cacheEntries: [cacheCount]u64,
+    cacheEntryCount: u64,
+    mutex: sync.Mutex,
+
+    const cacheCount = 16;
+
+    pub fn add(self: *@This(), elementSize: u64) u64 {
+        _ = self.mutex.acquire();
+        defer self.mutex.release();
+
+        if (self.elementSize != 0 and elementSize != self.elementSize) std.debug.panic("pool size mismatch", .{});
+        self.elementSize = elementSize;
+
+        if (self.cacheEntryCount != 0) {
+            self.cacheEntryCount -= 1;
+            const address = self.cacheEntries[self.cacheEntryCount];
+
+            @memset(@as([*]u8, @ptrFromInt(address))[0..self.elementSize], 0);
+            return address;
+        } else {
+            return heapFixed.alloc(self.elementSize, true);
+        }
+    }
+
+    pub fn remove(self: *@This(), ptr: u64) void {
+        _ = self.mutex.acquire();
+        defer self.mutex.release();
+
+        if (ptr == 0) return;
+
+        if (self.cacheEntryCount == cacheCount) {
+            heapFixed.free(ptr, self.elementSize);
+        } else {
+            self.cacheEntries[self.cacheEntryCount] = ptr;
+            self.cacheEntryCount += 1;
+        }
+    }
+};
