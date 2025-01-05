@@ -309,6 +309,29 @@ pub const AddressSpace = extern struct {
 
         return true;
     }
+    pub fn findAndPin(space: *AddressSpace, addr: u64, size: u64) callconv(.C) ?*Region {
+        if (@as(u64, @addWithOverflow(addr, size))) {
+            return null;
+        }
+
+        _ = space.reserveMutex.acquire();
+        defer space.reserveMutex.release();
+
+        const region = space.findRegion(addr) orelse return null;
+
+        if (region.descriptor.baseAddr > addr) return null;
+        if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize < addr + size) return null;
+        if (!region.data.pin.takeEx(WriterLock.shared, true)) return null;
+
+        return region;
+    }
+
+    pub fn unpinRegion(space: *AddressSpace, region: *Region) callconv(.C) void {
+        _ = space.reserveMutex.acquire();
+        defer space.reserveMutex.release();
+        region.data.pin.returnLock(WriterLock.shared);
+    }
+
     pub fn destroy(space: *Self) callconv(.C) void {
         var maybeNode = space.usedRegionsNonGuard.first;
         while (maybeNode) |node| {
