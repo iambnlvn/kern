@@ -12,7 +12,7 @@ const Mutex = Sync.Mutex;
 const WriterLock = Sync.WriterLock;
 const memory = kernel.memory;
 const arch = @import("./arch/x86_64.zig");
-
+const pageSize = arch.pageSize;
 pub const Thread = extern struct {
     inSafeCopy: bool,
     item: LinkedList(Thread).Node,
@@ -81,7 +81,7 @@ pub const Thread = extern struct {
         asyncTask,
     };
 
-    pub const flags = ds.Bitflag(enum(u32) {
+    pub const Flags = ds.Bitflag(enum(u32) {
         userLand = 0,
         lowPriority = 1,
         paused,
@@ -140,6 +140,91 @@ pub const Thread = extern struct {
         _ = thread.killedEvent.set(false);
         kernel.object.closeHandle(thread.process, 0);
         kernel.object.closeHandle(thread, 0);
+    }
+    pub fn spawn(startAddr: u64, arg1: u64, flags: Thread.Flags, maybeProc: ?*Process, arg2: u64) callconv(.C) ?*Thread {
+        if (startAddr == 0 and !flags.contains(.idle)) std.debug.panic("Start address is 0", .{});
+        const isUserLand = flags.contains(.isUserLand);
+        const parentThread = arch.getCurrentThread();
+        const process = if (maybeProc) |proc| proc else &kernel.process;
+        if (isUserLand and process == &kernel.process) kernel.panic("cannot add isUserLand thread to kernel process");
+
+        _ = process.threadsMutex.acquire();
+        defer process.threadsMutex.release();
+
+        if (process.preventNewThreads) return null;
+
+        const thread = @as(?*Thread, @ptrFromInt(kernel.scheduler.threadPool.add(@sizeOf(Thread)))) orelse return null;
+        const kernStackSize = 0x5000;
+        const userStackRes: u64 = if (isUserLand) 0x400000 else kernStackSize;
+        const userStackCommit: u64 = if (isUserLand) 0x10000 else 0;
+        var userStack: u64 = 0;
+        var kernelStack: u64 = 0;
+
+        var failed = false;
+        if (!flags.contains(.idle)) {
+            kernelStack = kernel.addrSpace.alloc(kernStackSize, memory.Region.Flags.fromFlag(.fixed), 0, true);
+            failed = (kernelStack == 0);
+            if (!failed) {
+                if (isUserLand) {
+                    userStack = process.addrSpace.alloc(userStackRes, memory.Region.Flags.empty(), 0, false);
+
+                    const region = process.addrSpace.findAndPin(userStack, userStackRes).?;
+                    _ = process.addrSpace.reserveMutex.acquire();
+                    failed = !process.addrSpace.commitCount(region, (userStackRes - userStackCommit) / pageSize, userStackCommit / pageSize);
+                    process.addrSpace.reserveMutex.release();
+                    process.addrSpace.unpinRegion(region);
+                    failed = failed or userStack == 0;
+                } else {
+                    userStack = kernelStack;
+                }
+            }
+        }
+
+        if (!failed) {
+            thread.paused.writeVolatile((parentThread != null and process == parentThread.?.process and parentThread.?.paused.readVolatile()) or flags.contains(.paused));
+            thread.handleCount.writeVolatile(2);
+            thread.isKernelThread = !isUserLand;
+            thread.priority = if (flags.contains(.lowPriority)) @intFromEnum(Thread.Priority.low) else @intFromEnum(Thread.Priority.normal);
+            thread.kernelStackBase = kernelStack;
+            thread.userStackBase = if (isUserLand) userStack else 0;
+            thread.userStackRes = userStackRes;
+            thread.userStackCommit.writeVolatile(userStackCommit);
+            thread.terminatableState.writeVolatile(if (isUserLand) .terminatable else .inSyscall);
+            thread.type =
+                if (flags.contains(.asyncTask)) Thread.Type.asyncTask else if (flags.contains(.idle)) Thread.Type.idle else Thread.Type.normal;
+            thread.id = @atomicRmw(u64, &kernel.scheduler.nextThreadID, .Add, 1, .SeqCst);
+            thread.process = process;
+            thread.item.value = thread;
+            thread.allItems.value = thread;
+            thread.procItem.value = thread;
+
+            if (thread.type != .idle) {
+                thread.interruptCtx = arch.initThread(kernelStack, kernStackSize, thread, startAddr, arg1, arg2, isUserLand, userStack, userStackRes);
+            } else {
+                thread.state.writeVolatile(.active);
+                thread.executing.writeVolatile(true);
+            }
+
+            process.threads.append(&thread.procItem);
+
+            _ = kernel.scheduler.allProcessesMutex.acquire();
+            kernel.scheduler.allThreads.prepend(&thread.allItems);
+            kernel.scheduler.allThreadsMutex.release();
+
+            _ = kernel.object.openHandle(process, 0);
+
+            if (thread.type == .normal) {
+                kernel.scheduler.dispatchSpinLock.acquire();
+                kernel.scheduler.addThreadToActiveThreads(thread, true);
+                kernel.scheduler.dispatchSpinLock.release();
+            }
+            return thread;
+        } else {
+            if (userStack != 0) _ = process.addrSpace.free(userStack, 0, false);
+            if (kernelStack != 0) _ = kernel.addrSpace.free(kernelStack, 0, false);
+            kernel.scheduler.threadPool.remove(@intFromPtr(thread));
+            return null;
+        }
     }
 
     // pub const Policy = enum(u16) {

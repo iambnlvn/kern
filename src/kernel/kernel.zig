@@ -20,7 +20,7 @@ pub export var heapFixed: Heap = undefined;
 pub export var physicalMemoryManager: memory.Physical.Allocator = undefined;
 pub export var globalData: *GlobalData = undefined;
 pub export var ipiLock: sync.SpinLock = undefined;
-
+pub export var process: scheduling.Process = undefined;
 pub export var mmCoreRegionArrayCommit: u64 = 0;
 
 pub const ES_INVALID_HANDLE: u64 = 0x0;
