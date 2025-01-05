@@ -121,6 +121,27 @@ pub const Thread = extern struct {
         (@as(*memory.AddressSpace, @ptrCast(oldSpace))).closeRef();
     }
 
+    fn kill(task: *AsyncTask) void {
+        const thread = @as(Thread, @fieldParentPtr("killAsyncTask", task));
+        Thread.setTemporaryAddressSpace(thread.process.addrSpace);
+
+        _ = kernel.scheduler.allThreadsMutex.acquire();
+        kernel.scheduler.allThreadsMutex.release();
+
+        _ = thread.process.threadsMutex.acquire();
+        thread.process.?.threads.remove(&thread.procItem);
+        const lastThread = thread.process.threads.count == 0;
+        thread.process.threadsMutex.release();
+
+        if (lastThread) ProcessKill(thread.process.?);
+
+        _ = kernel.addrSpace.free(thread.kernelStackBase, 0, false);
+        if (thread.userStackBase != 0) _ = thread.process.addrSpace.free(thread.userStackBase, 0, false);
+        _ = thread.killedEvent.set(false);
+        kernel.object.closeHandle(thread.process, 0);
+        kernel.object.closeHandle(thread, 0);
+    }
+
     // pub const Policy = enum(u16) {
     //     FIFO,
     //     RoundRobin,
@@ -154,6 +175,7 @@ pub const Process = extern struct {
     type: Process.Type,
     id: u64,
     handleCount: Volatile(u64),
+    handleTable: kernel.object.Handle.Table,
     allItems: LinkedList(Process).Node,
     crashed: bool,
     crashMutex: Mutex,
@@ -256,6 +278,8 @@ pub const Scheduler = extern struct {
     asyncTaskSpinLock: SpinLock,
     allThreads: LinkedList(Thread),
     allProcesses: LinkedList(Process),
+    allThreadsMutex: Mutex,
+    allProcessesMutex: Mutex,
     nextThreadID: u64,
     nextProcessID: u64,
     nextProcID: u64,
@@ -840,3 +864,27 @@ const Timer = extern struct {
         kernel.scheduler.activeTimersSpinLock.release();
     }
 };
+
+export fn ProcessKill(process: *Process) callconv(.C) void {
+    if (process.handleCount.readVolatile() == 0) std.debug.panic("process is on the all process list but there are no handles in it", .{});
+
+    _ = kernel.scheduler.activeProcessCount.atomicFetchAdd(1);
+
+    _ = kernel.scheduler.allProcessesMutex.acquire();
+    kernel.scheduler.allProcesses.remove(&process.allItems);
+
+    if (kernel.physicalMemoryManager.nextProcToBalance == process) {
+        kernel.physicalMemoryManager.nextProcToBalance = if (process.allItems.next) |next| next.value else null;
+        kernel.physicalMemoryManager.nextProcToBalance = null;
+        kernel.physicalMemoryManager.balanceResumePosition = 0;
+    }
+
+    kernel.scheduler.allProcessesMutex.release();
+
+    kernel.scheduler.dispatchSpinLock.acquire();
+    process.allThreadsTerminated = true;
+    kernel.scheduler.dispatchSpinLock.release();
+    _ = process.killedEvent.set(true);
+    process.handleTable.destroy();
+    process.addrSpace.destroy();
+}

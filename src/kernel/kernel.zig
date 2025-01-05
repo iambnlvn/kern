@@ -7,6 +7,7 @@ pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
 pub const MAX_WAIT_COUNT = 8;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
+pub const object = @import("obj.zig");
 
 const Heap = memory.Heap;
 pub export var scheduler: Scheduler = undefined;
@@ -21,6 +22,10 @@ pub export var globalData: *GlobalData = undefined;
 pub export var ipiLock: sync.SpinLock = undefined;
 
 pub export var mmCoreRegionArrayCommit: u64 = 0;
+
+pub const ES_INVALID_HANDLE: u64 = 0x0;
+pub const ES_CURRENT_THREAD: u64 = 0x10;
+pub const ES_CURRENT_PROCESS: u64 = 0x11;
 
 pub fn Volatile(comptime T: type) type {
     return extern struct {
