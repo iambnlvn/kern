@@ -8,7 +8,7 @@ pub const MAX_WAIT_COUNT = 8;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
 pub const object = @import("obj.zig");
-
+pub const serial = @import("./drivers/serial.zig");
 const Heap = memory.Heap;
 pub export var scheduler: Scheduler = undefined;
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
