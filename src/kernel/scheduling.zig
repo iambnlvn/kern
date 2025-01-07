@@ -250,10 +250,11 @@ pub const Node = extern struct {
 };
 pub const Process = extern struct {
     addrSpace: *memory.AddressSpace,
+    messageQueue: kernel.MessageQueue,
     threads: LinkedList(Thread),
     threadsMutex: Mutex,
     execNode: ?*Node,
-    execName: ?*const [32]u8,
+    execName: [32]u8,
     data: ProcCreateData,
     permissions: Process.Permission,
     creationFlags: Process.CreationFlags,
@@ -271,7 +272,7 @@ pub const Process = extern struct {
     preventNewThreads: bool,
     exitStatusCode: i32,
     killedEvent: Event,
-    execState: Process.ExecState,
+    execState: ExecState,
     execStartRequest: bool,
     execLoadAttempComplete: Event,
     execMainThread: ?*Thread,
@@ -285,7 +286,7 @@ pub const Process = extern struct {
         desktop,
     };
 
-    pub const Permission = Bitflag(enum(u32) {
+    pub const Permission = Bitflag(enum(u64) {
         network = 0,
         processCreation = 1,
         processOpen = 2,
@@ -300,21 +301,6 @@ pub const Process = extern struct {
     pub const CreationFlags = Bitflag(enum(u32) {
         paused = 0,
     });
-    const ProcCreateData = extern struct {
-        sysData: u64,
-        sybSysData: u64,
-        userDara: u64,
-        subSysID: u8,
-    };
-
-    const ExecState = enum(u8) {
-        notLoaded = 0,
-        failed = 1,
-        loaded,
-        running,
-        paused,
-        terminated,
-    };
 
     pub fn crash(self: *Process, crashReason: *kernel.CrashReason) callconv(.C) void {
         if (self == &kernel.process) std.debug.panic("kernel process has crashed", .{});
@@ -353,6 +339,20 @@ pub const Process = extern struct {
         self.threadsMutex.release();
     }
 };
+const ProcCreateData = extern struct {
+    sysData: u64,
+    sybSysData: u64,
+    userDara: u64,
+    subSysID: u8,
+};
+const ExecState = enum(u8) {
+    notLoaded = 0,
+    failed = 1,
+    loaded,
+    running,
+    paused,
+    terminated,
+};
 
 pub const Scheduler = extern struct {
     dispatchSpinLock: SpinLock,
@@ -368,6 +368,7 @@ pub const Scheduler = extern struct {
     nextThreadID: u64,
     nextProcessID: u64,
     nextProcID: u64,
+    allProcessesTerminatedEv: Event,
     activeProcessCount: Volatile(u64),
     blockShutdownProcCount: Volatile(u64),
     started: Volatile(bool),
@@ -376,6 +377,7 @@ pub const Scheduler = extern struct {
     timeMs: Volatile(u64),
     activeTimers: LinkedList(Timer),
     threadPool: kernel.Pool,
+    processPool: kernel.Pool,
     addrSpacePool: kernel.Pool,
 
     pub fn notifyObject(

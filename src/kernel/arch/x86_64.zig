@@ -1,5 +1,5 @@
 const std = @import("std");
-const kernel = @import("./../kernel.zig");
+const kernel = @import("../kernel.zig");
 const Thread = kernel.scheduling.Thread;
 const List = kernel.ds.List;
 const Mutex = kernel.sync.Mutex;
@@ -138,7 +138,7 @@ pub extern fn out8(port: u16, value: u8) callconv(.C) void;
 pub extern fn in8(port: u16) callconv(.C) u8;
 pub extern fn setAddressSpace(AddressSpace: *memory.AddressSpace) callconv(.C) void;
 
-const LocalStorage = extern struct {
+pub const LocalStorage = extern struct {
     currentThread: ?*Thread,
     idleThread: ?*Thread,
     asyncTaskThread: ?*Thread,
