@@ -8,7 +8,7 @@ pub const MAX_WAIT_COUNT = 8;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
 pub const object = @import("obj.zig");
-pub const serial = @import("./drivers/serial.zig");
+pub const drivers = @import("drivers.zig");
 const Heap = memory.Heap;
 pub export var scheduler: Scheduler = undefined;
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
@@ -249,3 +249,42 @@ pub const Pool = extern struct {
         }
     }
 };
+
+var formatBuff: [0x4000]u8 align(0x1000) = undefined;
+var formatLock: sync.SpinLock = undefined;
+
+pub fn log(comptime format: []const u8, args: anytype) void {
+    logEx(&formatBuff, &formatLock, format, args);
+}
+
+pub fn logEx(buffer: []u8, buffLock: *sync.SpinLock, comptime fmt: []const u8, args: anytype) void {
+    buffLock.acquire();
+    const logMsg = std.fmt.bufPrint(buffer[0..], fmt, args) catch |err|
+        {
+        var fmtBuff: [512]u8 = undefined;
+        const errorStr = std.fmt.bufPrint(fmtBuff[0..], "Unable to print: {}", .{err}) catch unreachable;
+        panic(errorStr);
+    };
+    drivers.serial.write(logMsg);
+    buffLock.release();
+}
+
+pub fn panic(message: []const u8) noreturn {
+    arch.disableInterrupts();
+    _ = arch.IPI.send(arch.IPI.kernelPanic, true, -1);
+    scheduler.panic.writeVolatile(true);
+    drivers.serial.write("KERNEL PANIC:\n");
+    drivers.serial.write(message);
+    arch.halt();
+}
+
+var panicLock: sync.SpinLock = undefined;
+var panicBuff: [0x4000]u8 align(0x1000) = undefined;
+
+pub fn panicf(comptime fmt: []const u8, args: anytype) noreturn {
+    arch.disableInterrupts();
+    _ = arch.IPI.send(arch.IPI.kernelPanic, true, -1);
+    scheduler.panic.writeVolatile(true);
+    logEx(&panicBuff, &panicLock, "KERNEL PANIC:\n" ++ fmt, args);
+    arch.halt();
+}
