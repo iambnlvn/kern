@@ -288,3 +288,18 @@ pub fn panicf(comptime fmt: []const u8, args: anytype) noreturn {
     logEx(&panicBuff, &panicLock, "KERNEL PANIC:\n" ++ fmt, args);
     arch.halt();
 }
+
+pub const MessageQueue = extern struct {
+    messages: ds.Array(MessageObject, .core),
+    mouseMovedMessage: u64,
+    windowResizedMessage: u64,
+    eyedropResultMessage: u64,
+    keyRepeatMessage: u64,
+    pinged: bool,
+    mutex: sync.Mutex,
+    notEmpty: sync.Event,
+};
+
+pub const MessageObject = extern struct {
+    array: [5]u64,
+};
