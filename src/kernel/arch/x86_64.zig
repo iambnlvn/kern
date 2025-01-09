@@ -134,8 +134,14 @@ pub extern fn ProcessorReadCR3() callconv(.C) u64;
 pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
 pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
+
 pub extern fn out8(port: u16, value: u8) callconv(.C) void;
 pub extern fn in8(port: u16) callconv(.C) u8;
+pub extern fn out16(port: u16, value: u16) callconv(.C) void;
+pub extern fn in16(port: u16) callconv(.C) u16;
+pub extern fn out32(port: u16, value: u32) callconv(.C) void;
+pub extern fn in32(port: u16) callconv(.C) u32;
+
 pub extern fn setAddressSpace(AddressSpace: *memory.AddressSpace) callconv(.C) void;
 
 pub const LocalStorage = extern struct {
@@ -888,4 +894,38 @@ pub export fn translateAddr(va: u64, hasWriteAccess: bool) callconv(.C) u64 {
     if (hasWriteAccess and pa & 2 == 0) return 0;
     if (pa & 1 == 0) return 0;
     return pa & 0x0000FFFFFFFFF000;
+}
+
+const IO_PCI_CONFIG_ADDRESS = 0x0CF8;
+const IO_PCI_DATA = 0x0CFC;
+var pciConfigSpinlock: kernel.sync.SpinLock = undefined;
+
+pub fn readPciConfig(bus: u8, device: u7, func: u8, offset: u8, size: 32) u32 {
+    pciConfigSpinlock.acquire();
+    defer pciConfigSpinlock.release();
+
+    if (offset & 3 != 0) kernel.panic("PCI config read offset is not aligned");
+    out32(IO_PCI_CONFIG_ADDRESS, 0x80000000 | ((@as(u32, @intCast(bus))) << 16) | ((@as(u32, @intCast(device))) << 11) | ((@as(u32, @intCast(func))) << 8) | @as(u32, @intCast(offset)));
+
+    switch (size) {
+        8 => return in8(IO_PCI_DATA),
+        16 => return in16(IO_PCI_DATA),
+        32 => return in32(IO_PCI_DATA),
+        else => kernel.panic("Invalid PCI config read size"),
+    }
+}
+
+pub fn writePciConfig(bus: u8, device: u8, func: u8, offset: u8, value: u32, size: u32) void {
+    pciConfigSpinlock.acquire();
+    defer pciConfigSpinlock.release();
+
+    if (offset & 3 != 0) kernel.panic("PCI config read offset is not aligned");
+    out32(IO_PCI_CONFIG_ADDRESS, 0x80000000 | ((@as(u32, @intCast(bus))) << 16) | ((@as(u32, @intCast(device))) << 11) | ((@as(u32, @intCast(func))) << 8) | @as(u32, @intCast(offset)));
+
+    switch (size) {
+        8 => return out8(IO_PCI_DATA, @as(u8, @intCast(value))),
+        16 => return in16(IO_PCI_DATA, @as(u16, @intCast(value))),
+        32 => return in32(IO_PCI_DATA, value),
+        else => kernel.panic("Invalid PCI config read size"),
+    }
 }
