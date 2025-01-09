@@ -32,4 +32,13 @@ pub const Device = extern struct {
             else => @panic("Unsupported bit width"),
         };
     }
+    pub fn writeConfig(comptime T: type, self: *@This(), offset: u8, value: T) void {
+        const bitWidth = @sizeOf(T) * 8;
+        switch (bitWidth) {
+            8 => arch.writePciConfig(self.bus, self.slot, self.func, offset, value, 8),
+            16 => arch.writePciConfig(self.bus, self.slot, self.func, offset, value, 16),
+            32 => arch.writePciConfig(self.bus, self.slot, self.func, offset, value, 32),
+            else => @panic("Unsupported bit width"),
+        }
+    }
 };
