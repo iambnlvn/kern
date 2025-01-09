@@ -26,7 +26,7 @@ pub export var mmCoreRegionArrayCommit: u64 = 0;
 pub const ES_INVALID_HANDLE: u64 = 0x0;
 pub const ES_CURRENT_THREAD: u64 = 0x10;
 pub const ES_CURRENT_PROCESS: u64 = 0x11;
-
+pub const ES_SUCCESS: u64 = -1;
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,
