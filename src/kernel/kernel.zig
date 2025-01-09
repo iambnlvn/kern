@@ -9,6 +9,7 @@ pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
 pub const object = @import("obj.zig");
 pub const drivers = @import("drivers.zig");
+const RandomNumberGenerator = @import("kernelUtils.zig").RandomNumberGenerator;
 const Heap = memory.Heap;
 pub export var scheduler: Scheduler = undefined;
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
@@ -22,6 +23,7 @@ pub export var globalData: *GlobalData = undefined;
 pub export var ipiLock: sync.SpinLock = undefined;
 pub export var process: scheduling.Process = undefined;
 pub export var mmCoreRegionArrayCommit: u64 = 0;
+pub var rng: RandomNumberGenerator = undefined;
 
 pub const ES_INVALID_HANDLE: u64 = 0x0;
 pub const ES_CURRENT_THREAD: u64 = 0x10;
