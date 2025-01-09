@@ -878,6 +878,40 @@ export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
     kernel.scheduler.dispatchSpinLock.release();
 }
 
+export fn threadExit(thread: *Thread) callconv(.C) void {
+    kernel.scheduler.dispatchSpinLock.acquire();
+
+    var yield = false;
+    const wasTerminating = thread.terminating.readVolatile();
+    if (!wasTerminating) {
+        thread.terminating.writeVolatile(true);
+        thread.paused.writeVolatile(false);
+    }
+
+    if (thread == arch.getCurrentThread()) {
+        thread.terminatableState.writeVolatile(.terminatable);
+        yield = true;
+    } else if (!wasTerminating and !thread.executing.readVolatile()) {
+        switch (thread.terminatableState.readVolatile()) {
+            .terminatable => {
+                if (thread.state.readVolatile() != .active) kernel.panic("terminatable thread non-active");
+
+                thread.item.removeFromList();
+                thread.killAsyncTask.register(Thread.kill);
+                yield = true;
+            },
+            .userBblockRequest => {
+                const threadState = thread.state.readVolatile();
+                if (threadState == .waitingMutex or threadState == .waitingEvent) kernel.scheduler.unblockThread(thread, null);
+            },
+            else => {},
+        }
+    }
+
+    kernel.scheduler.dispatchSpinLock.release();
+    if (yield) arch.fakeTimerInterrupt();
+}
+
 pub const AsyncTask = extern struct {
     item: ds.List,
     cb: u64,
@@ -974,4 +1008,33 @@ export fn ProcessKill(process: *Process) callconv(.C) void {
     _ = process.killedEvent.set(true);
     process.handleTable.destroy();
     process.addrSpace.destroy();
+}
+
+export fn procExit(proc: *Process, status: i32) callconv(.C) void {
+    _ = proc.threadsMutex.acquire();
+    proc.exitStatusCode = status;
+    proc.preventNewThreads = true;
+
+    const currentThread = arch.getCurrentThread().?;
+    const isCurrentProc = currentThread == proc;
+
+    var currentThreadFound = false;
+    var threadNode = proc.threads.first;
+
+    while (threadNode) |node| {
+        const thread = node.value.?;
+        threadNode = node.next;
+
+        if (thread != currentThread) {
+            threadExit(thread);
+        } else if (isCurrentProc) {
+            currentThreadFound = true;
+        } else kernel.panic("current thread is in the wrong process");
+    }
+
+    proc.threadsMutex.release();
+
+    if (!currentThreadFound and isCurrentProc) kernel.panic("current thread not found in process") else if (isCurrentProc) {
+        threadExit(currentThread);
+    }
 }
