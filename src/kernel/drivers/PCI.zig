@@ -41,4 +41,26 @@ pub const Device = extern struct {
             else => @panic("Unsupported bit width"),
         }
     }
+
+    pub fn readBaseAddrReg(comptime T: type, self: *@This(), index: u32, offset: u32) T {
+        const baseAddr = self.baseAddrSpace[index];
+        if (baseAddr & 1 != 0) {
+            return switch (@sizeOf(T)) {
+                1 => @as(T, arch.in8(@as(u16, @intCast((baseAddr & ~@as(u32, 3)) + offset)))),
+                4 => @as(T, arch.in32(@as(u32, @intCast((baseAddr & ~@as(u32, 3)) + offset)))),
+                else => @panic("Unsupported type size for I/O access"),
+            };
+        } else {
+            return @as(*volatile T, @ptrFromInt(self.baseVA[index] + offset)).*;
+        }
+    }
+
+    pub fn writeBaseAddrReg32(self: @This(), index: u32, offset: u32, value: u32) void {
+        const baseAddr = self.baseAddrSpace[index];
+        if (baseAddr & 1 != 0) {
+            arch.out32(@as(u16, @intCast((baseAddr & ~@as(u32, 3)) + offset)), value);
+        } else {
+            @as(*volatile u32, @ptrFromInt(self.baseVA[index] + offset)).* = value;
+        }
+    }
 };
