@@ -180,6 +180,19 @@ pub const Device = extern struct {
         }
         return false;
     }
+
+    pub fn enableSingleInterrupt(self: *@This(), handler: arch.KIRQHandler, ctx: u64, ownerName: []const u8) bool {
+        if (self.enableMSI(handler, ctx, ownerName)) return true;
+        if (self.interruptPin == 0 or self.interruptPin > 4) return false;
+
+        const res = self.enableFeatures(Features.fromFlag(.interrups));
+        var line = @as(i64, @intCast(self.interruptLine));
+        //TODO!: figure it out (depends on the bl)
+        // if (res) {
+        //     arch.registerIRQ(line, handler, ctx, ownerName);
+        //     return true;
+        // }
+    }
 };
 
 pub const Features = kernel.ds.Bitflag(enum(u64) {
@@ -194,3 +207,23 @@ pub const Features = kernel.ds.Bitflag(enum(u64) {
     memorySpaceAccess = 10,
     ioPortAccess = 11,
 });
+
+pub const Driver = struct {
+    devices: []Device,
+    busScanStates: [256]u8,
+
+    pub fn init() void {
+        const devicesOffset = roundUp(u64, @sizeOf(Driver), @alignOf(Device));
+
+        const allocSize = devicesOffset + (@sizeOf(Device) * Device.maxCount);
+
+        const address = kernel.addrSpace.alloc(allocSize, kernel.memory.Region.Flags.fromFlag(.fixed), arch.modulePtr, true);
+        if (address == 0) kernel.panic("Could not allocate memory for PCI driver");
+        arch.modulePtr += roundUp(u64, allocSize, pageSize);
+
+        const driver = @as(*Driver, @ptrFromInt(address));
+        driver.devices.ptr = @as([*]Device, @ptrFromInt(address + devicesOffset));
+        driver.devices.len = 0;
+        // driver.setup();
+    }
+};

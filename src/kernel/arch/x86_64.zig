@@ -27,6 +27,7 @@ export var tlbShootdownVirtualAddress: Volatile(u64) = undefined;
 export var tlbShootdownPageCount: Volatile(u64) = undefined;
 export var timeStampCounterSynchronizationValue = Volatile(u64){ .value = 0 };
 const invalidateAllPagesThreshold = 1024;
+pub var modulePtr: u64 = modulesStart;
 
 var getTimeFromPitMsStarted = false;
 var getTimeFromPitMsLast: u64 = 0;
