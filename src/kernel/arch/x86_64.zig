@@ -414,6 +414,25 @@ comptime {
         \\  mov rax, cr4                // Load CR4 register
         \\  or rax, 1 << 7              // Set bit 7 (Global Pages enable)
         \\  mov cr4, rax                // Write back to CR4 register
+
+        // Enable TCE support, if available
+        \\  mov eax, 0x80000001         // Query extended features (CPUID leaf 0x80000001)
+        \\  xor ecx, ecx                // Clear ECX (sub-leaf index 0)
+        \\  cpuid                       // Execute CPUID instruction
+        \\  and ecx, 1 << 17            // Check for TCE support (bit 17 in ECX)
+        \\  shr ecx, 17                 // Extract TCE support bit (0 or 1)
+        \\  mov rax, OFFSET pagingTCESupport // Address of pagingTCESupport variable
+        \\  and [rax], ecx              // Store TCE support status (1 if supported, 0 otherwise)
+        \\  cmp ecx, 0                  // Check if TCE is supported
+        \\  je .noTceSupport            // Jump if TCE is not supported
+        \\  mov ecx, 0xC0000080         // Target Extended Feature Enable Register (EFER)
+        \\  rdmsr                      // Read the EFER register
+        \\  or eax, 1 << 15             // Set bit 15 (TCE enable)
+        \\  wrmsr                      // Write back to the EFER register
+        \\.noTceSupport:
+        \\  mov rax, cr0                // Load CR0 register
+        \\  or rax, 1 << 16             // Set bit 16 (related to paging and protection enable)
+        \\  mov cr0, rax                // Write back to CR0 register
     );
 }
 
