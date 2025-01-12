@@ -395,6 +395,25 @@ comptime {
         \\  or rax, 1 << 20             // Set bit 20 (SMEP enable)
         \\  mov cr4, rax                // Write back to CR4
         \\.noSMEPSupport:
+        // Enable PCID support, if available
+        \\  mov eax, 1                  // Request basic feature set (leaf 1)
+        \\  xor ecx, ecx                // Sub-leaf index 0
+        \\  cpuid                       // Execute CPUID instruction
+        \\  and ecx, 1 << 17            // Check for PCID (bit 17 in ECX)
+        \\  shr ecx, 17                 // Extract PCID bit (0 or 1)
+        \\  mov rax, OFFSET pagingPCIDSupport // Address of pagingPCIDSupport variable
+        \\  and [rax], ecx              // Store PCID support status (1 if supported, 0 otherwise)
+        \\  cmp ecx, 0                  // Check if PCID is supported
+        \\  je .noPCIDSupport           // Jump if PCID is not supported
+        \\  mov rax, cr4                // Load CR4 register
+        \\  or rax, 1 << 17             // Set bit 17 (PCID enable)
+        \\  mov cr4, rax                // Write back to CR4
+        \\.noPCIDSupport:
+
+        // Enable global pages
+        \\  mov rax, cr4                // Load CR4 register
+        \\  or rax, 1 << 7              // Set bit 7 (Global Pages enable)
+        \\  mov cr4, rax                // Write back to CR4 register
     );
 }
 
