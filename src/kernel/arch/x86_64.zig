@@ -134,7 +134,7 @@ pub extern fn ProcessorReadCR3() callconv(.C) u64;
 pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
 pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
-
+pub const KIRQHandler = fn (interruptIdx: u64, ctx: u64) callconv(.C) bool;
 pub extern fn out8(port: u16, value: u8) callconv(.C) void;
 pub extern fn in8(port: u16) callconv(.C) u8;
 pub extern fn out16(port: u16, value: u16) callconv(.C) void;
@@ -929,3 +929,42 @@ pub fn writePciConfig(bus: u8, device: u8, func: u8, offset: u8, value: u32, siz
         else => kernel.panic("Invalid PCI config read size"),
     }
 }
+
+const interruptVectorMSIStart = 0x70;
+pub export var irqHandlersLock: kernel.sync.SpinLock = undefined;
+pub export var msiHandlers: [interruptVectorMSIStart]MSIHandler = undefined;
+pub const MSIHandler = extern struct {
+    callback: ?KIRQHandler,
+    ctx: u64,
+};
+pub const MSI = extern struct {
+    address: u64,
+    data: u64,
+    tag: u64,
+
+    pub fn register(handler: KIRQHandler, ctx: u64, ownerName: []const u8) @This() {
+        _ = ownerName;
+        irqHandlersLock.acquire();
+        defer irqHandlersLock.release();
+
+        for (msiHandlers, 0..) |*msiHandler, i| {
+            if (msiHandler.callback != null) continue;
+
+            msiHandler.* = MSIHandler{ .callback = handler, .ctx = ctx };
+
+            return .{
+                .address = 0xfee00000,
+                .data = interruptVectorMSIStart + i,
+                .tag = i,
+            };
+        }
+
+        return zeroes(MSI);
+    }
+
+    pub fn unregister(tag: u64) void {
+        irqHandlersLock.acquire();
+        defer irqHandlersLock.release();
+        msiHandlers[tag].callback = null;
+    }
+};
