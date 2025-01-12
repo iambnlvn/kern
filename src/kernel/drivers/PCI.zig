@@ -119,6 +119,67 @@ pub const Device = extern struct {
         }
         return true;
     }
+
+    pub fn enableMSI(self: *@This(), handler: arch.KIRQHandler, ctx: u64, ownerName: []const u8) bool {
+        const status = @as(u16, @truncate(self.readConfig(u32, 0x4 >> 16)));
+        if (~status & (1 << 4) != 0) return false;
+
+        var ptr = self.readConfig(u8, 0x34);
+        var idx: u64 = 0;
+
+        while (true) {
+            if (ptr == 0) break;
+            const _idx = idx;
+            idx += 1;
+            if (_idx >= 0xff) break;
+
+            var dw = self.readConfig(u32, ptr);
+            const nextPtr = @as(u8, @truncate(dw >> 8));
+            const id = @as(u8, @truncate(dw));
+
+            if (id != 5) {
+                ptr = nextPtr;
+                continue;
+            }
+
+            const msi = arch.MSI.register(handler, ctx, ownerName);
+
+            if (msi.address == 0) return false;
+            var control = @as(u16, @truncate(dw >> 16));
+
+            if (msi.data & ~@as(u64, 0xffff) != 0) {
+                arch.MSI.unregister(msi.tag);
+                return false;
+            }
+
+            if (msi.address & 0b11 != 0) {
+                arch.MSI.unregister(msi.tag);
+                return false;
+            }
+            if (msi.address & 0xFFFFFFFF00000000 != 0 and ~control & (1 << 7) != 0) {
+                arch.MSI.unregister(msi.tag);
+                return false;
+            }
+
+            control = (control & ~@as(u16, 7 << 4)) | (1 << 0);
+            dw = @as(u16, @truncate(dw)) | (@as(u32, control) << 16);
+
+            self.writeConfig(u32, ptr + 0, dw);
+            self.writeConfig(u32, ptr + 4, @as(u32, @truncate(msi.address)));
+
+            if (control & (1 << 7) != 0) {
+                self.writeConfig(ptr + 8, @as(u32, @truncate(msi.address >> 32)));
+                self.writeConfig(u16, ptr + 12, @as(u16, @intCast((self.readConfig(u16, ptr + 12) & 0x3800) | msi.data)));
+                if (control & (1 << 8) != 0) self.writeConfig(u32, ptr + 16, 0);
+            } else {
+                self.writeConfig(u16, ptr + 8, @as(u16, @intCast(msi.data)));
+                if (control & (1 << 8) != 0) self.writeConfig(u32, ptr + 12, 0);
+            }
+
+            return true;
+        }
+        return false;
+    }
 };
 
 pub const Features = kernel.ds.Bitflag(enum(u64) {
