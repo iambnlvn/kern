@@ -380,6 +380,21 @@ comptime {
         \\  xor eax, eax                // Clear EAX to query basic CPUID information
         \\  cpuid                       // Get CPUID basic information
         \\  cmp eax, 7                  // Check if extended features are supported
+        \\  jb .noSMEPSupport           // Jump if the CPUID instruction is not supported (based on prior flags)
+        \\  mov eax, 7                  // Request extended features (leaf 7)
+        \\  xor ecx, ecx                // Sub-leaf index 0
+        \\  cpuid                       // Execute CPUID instruction
+        \\  and ebx, 1 << 7             // Check for SMEP (bit 7 in EBX)
+        \\  shr ebx, 7                  // Extract SMEP bit (0 or 1)
+        \\  mov rax, OFFSET pagingSMEPSupport // Address of pagingSMEPSupport variable
+        \\  and [rax], ebx              // Store SMEP support status (1 if supported, 0 otherwise)
+        \\  cmp ebx, 0                  // Check if SMEP is supported
+        \\  je .noSMEPSupport           // Jump if SMEP is not supported
+        \\  mov word ptr [rax], 2       // Set SMEP state to 2 (indicating enabled)
+        \\  mov rax, cr4                // Load CR4 register
+        \\  or rax, 1 << 20             // Set bit 20 (SMEP enable)
+        \\  mov cr4, rax                // Write back to CR4
+        \\.noSMEPSupport:
     );
 }
 
