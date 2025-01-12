@@ -5,6 +5,7 @@ const roundUp = utils.roundUp;
 const arch = kernel.arch;
 const pageSize = arch.pageSize;
 
+pub var driver: *Driver = undefined;
 pub const Device = extern struct {
     deviceID: u32,
     sybsystemID: u32,
@@ -221,7 +222,7 @@ pub const Driver = struct {
         if (address == 0) kernel.panic("Could not allocate memory for PCI driver");
         arch.modulePtr += roundUp(u64, allocSize, pageSize);
 
-        const driver = @as(*Driver, @ptrFromInt(address));
+        driver = @as(*Driver, @ptrFromInt(address));
         driver.devices.ptr = @as([*]Device, @ptrFromInt(address + devicesOffset));
         driver.devices.len = 0;
         driver.setup();
