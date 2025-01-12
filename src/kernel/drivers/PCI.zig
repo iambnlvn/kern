@@ -185,8 +185,8 @@ pub const Device = extern struct {
         if (self.enableMSI(handler, ctx, ownerName)) return true;
         if (self.interruptPin == 0 or self.interruptPin > 4) return false;
 
-        const res = self.enableFeatures(Features.fromFlag(.interrups));
-        var line = @as(i64, @intCast(self.interruptLine));
+        // const res = self.enableFeatures(Features.fromFlag(.interrups));
+        // var line = @as(i64, @intCast(self.interruptLine));
         //TODO!: figure it out (depends on the bl)
         // if (res) {
         //     arch.registerIRQ(line, handler, ctx, ownerName);
@@ -224,6 +224,89 @@ pub const Driver = struct {
         const driver = @as(*Driver, @ptrFromInt(address));
         driver.devices.ptr = @as([*]Device, @ptrFromInt(address + devicesOffset));
         driver.devices.len = 0;
-        // driver.setup();
+        driver.setup();
     }
+
+    fn setup(self: *@This()) void {
+        const baseHeaderType = arch.readPciConfig(u32, 0, 0, 0, 0x0c);
+        const baseBusCount: u8 = if (baseHeaderType & 0x80 != 0) 8 else 1;
+        var busToScanCount: u8 = 0;
+
+        var baseBus: u8 = 0;
+        while (baseBus < baseBusCount) : (baseBus += 1) {
+            const deviceID = arch.readPciConfig(u32, 0, 0, baseBus, 0);
+            if (deviceID & 0xffff != 0xffff) {
+                self.busScanStates[baseBus] = @intFromEnum(Bus.scanNext);
+                busToScanCount += 1;
+            }
+        }
+
+        if (busToScanCount == 0) kernel.panic("No bus found");
+
+        var foundUSB = false;
+
+        while (busToScanCount > 0) {
+            for (self.busScanStates, 0..) |*bss, _bus| {
+                const bus = @as(u8, @intCast(_bus));
+                if (bss.* == @intFromEnum(Bus.scanNext)) {
+                    bss.* = @intFromEnum(Bus.scanned);
+                    busToScanCount -= 1;
+
+                    var device: u8 = 0;
+                    while (device < 32) : (device += 1) {
+                        const _deviceID = arch.readPciConfig(u32, bus, device, 0, 0);
+                        if (_deviceID & 0xffff != 0xffff) {
+                            const headerType = @as(u8, @truncate(arch.readPciConfig(u32, bus, device, 0, 0x0c) >> 16));
+                            const funcCount: u8 = if (headerType & 0x80 != 0) 8 else 1;
+
+                            var function: u8 = 0;
+                            while (function < funcCount) : (function += 1) {
+                                const deviceID = arch.readPciConfig(u32, bus, device, function, 0);
+                                if (deviceID & 0xffff != 0xffff) {
+                                    const deviceClass = arch.readPciConfig(u32, bus, device, function, 0x08);
+                                    const interruptInfo = arch.readPciConfig(u32, bus, device, function, 0x3c);
+                                    const index = self.devices.len;
+                                    self.devices.len += 1;
+
+                                    const pciDevice = &self.devices[index];
+                                    pciDevice.classCode = @as(u8, @truncate(deviceClass >> 24));
+                                    pciDevice.subClassCode = @as(u8, @truncate(deviceClass >> 16));
+                                    pciDevice.progIF = @as(u8, @truncate(deviceClass >> 8));
+                                    pciDevice.bus = bus;
+                                    pciDevice.slot = device;
+                                    pciDevice.func = function;
+                                    pciDevice.interruptPin = @as(u8, @truncate(interruptInfo >> 8));
+                                    pciDevice.interruptLine = @as(u8, @truncate(interruptInfo >> 0));
+                                    pciDevice.deviceID = arch.readPciConfig(u32, bus, device, function, 0);
+                                    pciDevice.sybsystemID = arch.readPciConfig(u32, bus, device, function, 0x2c);
+
+                                    for (pciDevice.baseAddrSpace, 0..) |*baseAddr, i| {
+                                        baseAddr.* = pciDevice.readConfig(u32, @as(u8, @intCast(0x10 + 4 * i)));
+                                    }
+
+                                    const isPCIBridge = pciDevice.classCode == 0x06 and pciDevice.subClassCode == 0x04;
+                                    if (isPCIBridge) {
+                                        const secondaryBus = @as(u8, @truncate(arch.readPciConfig(u32, bus, device, function, 0x18) >> 8));
+                                        if (self.busScanStates[secondaryBus] == @intFromEnum(Bus.doNotScan)) {
+                                            busToScanCount += 1;
+                                            self.busScanStates[secondaryBus] = @intFromEnum(Bus.scanNext);
+                                        }
+                                    }
+
+                                    const isUSB = pciDevice.classCode == 12 and pciDevice.subClassCode == 3;
+                                    if (isUSB) foundUSB = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+};
+
+pub const Bus = enum(u8) {
+    doNotScan = 0,
+    scanNext = 1,
+    scanned = 2,
 };
