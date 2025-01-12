@@ -1509,3 +1509,10 @@ export fn MMPhysicalInsertFreePagesEnd() callconv(.C) void {
 export fn EsHeapAllocate(size: u64, isZero: bool, heap: *Heap) callconv(.C) u64 {
     return heap.alloc(size, isZero);
 }
+
+pub export fn checkUnusable(physicalStart: u64, byteCount: u64) callconv(.C) void {
+    var i = physicalStart / pageSize;
+    while (i < (physicalStart + byteCount + pageSize - 1) / pageSize and i < kernel.physicalMemoryManager.pageFrameDBCount) : (i += 1) {
+        if (kernel.physicalMemoryManager.pageFrames[i].state.readVolatile() != .unusable) kernel.panic("Pageframe at address should be unusable");
+    }
+}
