@@ -433,6 +433,28 @@ comptime {
         \\  mov rax, cr0                // Load CR0 register
         \\  or rax, 1 << 16             // Set bit 16 (related to paging and protection enable)
         \\  mov cr0, rax                // Write back to CR0 register
+        // Enable MMX, SSE, and SSE2
+        \\  mov rax, cr0                // Load CR0 register
+        \\  mov rbx, cr4                // Load CR4 register
+        \\  and rax, ~4                 // Clear EM (bit 2) in CR0 (enable FPU instructions)
+        \\  or rax, 2                   // Set MP (bit 1) in CR0 (monitor co-processor)
+        \\  or rbx, 512 + 1024          // Set OSFXSR (bit 9) and OSXMMEXCPT (bit 10) in CR4 (enable SSE/SSE2)
+        \\  mov cr0, rax                // Write updated CR0 register
+        \\  mov cr4, rbx                // Write updated CR4 register
+
+        // Detect SSE3 and SSSE3, if available
+        \\  mov eax, 1                  // Query processor features (CPUID leaf 1)
+        \\  cpuid                       // Execute CPUID instruction
+        \\  test ecx, 1 << 0            // Check for SSE3 support (bit 0 in ECX)
+        \\  jnz .hasSSE3                // Jump if SSE3 is supported
+        \\  mov rax, OFFSET simdSSE3Support // Address of simdSSE3Support variable
+        \\  and byte ptr [rax], 0       // Mark SSE3 as unsupported (clear to 0)
+        \\.hasSSE3:
+        \\  test ecx, 1 << 9            // Check for SSSE3 support (bit 9 in ECX)
+        \\  jnz .hasSSSE3               // Jump if SSSE3 is supported
+        \\  mov rax, OFFSET simdSSSE3Support // Address of simdSSSE3Support variable
+        \\  and byte ptr [rax], 0       // Mark SSSE3 as unsupported (clear to 0)
+        \\.hasSSSE3:
     );
 }
 
