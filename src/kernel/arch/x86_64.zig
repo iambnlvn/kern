@@ -348,6 +348,41 @@ fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
         }
     };
 }
+comptime {
+    asm (
+        \\  .intel_syntax noprefix
+        \\  .global CPUSetup1
+        \\CPUSetup1:
+        // Check for no-execute (NXE) bit support in CPU
+        \\  mov eax, 0x80000001          // Query extended features (CPUID)
+        \\  cpuid
+        \\  and edx, 1 << 20            // Check bit 20 (NXE support)
+        \\  shr edx, 20                 // Extract NXE bit (0 or 1)
+        \\  mov rax, OFFSET pagingNXESupport // Address of the pagingNXESupport variable
+        \\  and [rax], edx              // Store NXE support status (1 if supported, 0 otherwise)
+        \\  cmp edx, 0                  // Check if NXE is supported
+        \\  je .noPagingNXEsupport      // Jump if NXE is not supported
+        \\  mov ecx, 0xC0000080         // Target the Extended Feature Enable Register (EFER)
+        \\  rdmsr                      // Read the EFER register
+        \\  or eax, 1 << 11             // Set bit 11 (NXE enable)
+        \\  wrmsr                      // Write back to the EFER register
+        \\.noPagingNXEsupport:
+
+        // Initialize the x87 FPU
+        \\  fninit                      // Reset the x87 FPU
+        \\  mov rax, OFFSET .cw         // Load address of control word
+        \\  fldcw [rax]                 // Load the x87 control word
+        \\  jmp .cwa                    // Skip control word data
+        \\.cw: .short 0x037a            // Control word for x87 (enable specific precision and exceptions)
+        \\.cwa:
+
+        // Ensure the kernel cannot execute userland pages
+        \\  xor eax, eax                // Clear EAX to query basic CPUID information
+        \\  cpuid                       // Get CPUID basic information
+        \\  cmp eax, 7                  // Check if extended features are supported
+    );
+}
+
 pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlags) bool {
     const va = faultyAddr & ~@as(u64, pageSize - 1);
     const forSupervisor = flags.contains(.forSupervisor);
