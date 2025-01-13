@@ -495,6 +495,40 @@ comptime {
         // Space for 4 8-byte values at gs:0 - gs:31
         \\  add qword ptr [rdi], 32           // Update memory at GS:0 (for local storage or thread-specific data)
         \\  wrmsr                            // Write back to MSR (Model-Specific Register)
+        // Load the IDT (Interrupt Descriptor Table Register)
+        \\  .loadIdtr:
+        \\  mov rax, OFFSET idtDescriptor    // Load address of the IDT descriptor structure
+        \\  mov word ptr [rax], 0x1000       // Set IDT limit (size - 1), 0x1000 indicates size 4096 bytes
+        \\  mov qword ptr [rax + 2], OFFSET idtData // Load address of the IDT table
+        \\  lidt [rax]                       // Load IDT descriptor into IDTR register
+        \\  sti                              // Enable interrupts
+
+        // Enable APIC (Advanced Programmable Interrupt Controller)
+        \\  .enableAPIC:
+        // In AMD CPUs, the APIC is always enabled by default, but we need to configure it
+        \\  mov ecx, 0x1B                    // Access MSR (Model-Specific Register) for APIC control
+        \\  rdmsr                            // Read the current MSR value into EDX:EAX
+        \\  or eax, 0x800                    // Set bit 11 to enable APIC
+        \\  wrmsr                            // Write modified MSR value back to control APIC state
+        \\  and eax, ~0xFFF                  // Mask the lower 12 bits to configure the APIC base
+        \\  mov edi, eax                     // Store the result in EDI register (APIC base address)
+        \\  mov rax, 0xFFFFFE00000000F0      // Calculate APIC base address (interrupt vectors)
+        \\  add rax, rdi                     // Add the APIC base address to RAX
+        \\  mov ebx, [rax]                   // Load APIC value from the computed address
+        \\  or ebx, 0x1FF                    // Set lower 9 bits to configure APIC behavior
+        \\  mov [rax], ebx                   // Write the modified APIC value back to memory
+        \\  mov rax, 0xFFFFFE00000000E0      // Next APIC register (e.g., Task Priority Register)
+        \\  add rax, rdi                     // Add the APIC base address to RAX
+        \\  mov dword ptr [rax], 0xFFFFFFFF  // Set the Task Priority Register to the maximum value
+        \\  xor rax, rax                     // Zero out RAX register
+        \\  mov cr8, rax                     // Write to CR8 register to disable interrupt processing
+        \\  ret                              // Return from this function
+
+        // Global function to retrieve the current thread's GS base address
+        \\  .global getCurrentThread
+        \\  getCurrentThread:
+        \\  mov rax, qword ptr gs:16          // Load the current thread's address from GS:16
+        \\  ret                              // Return the value of RAX
     );
 }
 
