@@ -569,6 +569,52 @@ comptime {
         \\  mov cr8, rax                     // Write to CR8 to enable interrupts
         \\  sti                              // Set the interrupt flag (enable interrupts)
         \\  ret                              // Return from the function
+        // Disable interrupts by modifying CR8 register
+        \\  .global disableInterrupts
+        \\  disableInterrupts:
+        \\  mov rax, 14                      // Load the value 14 into RAX (value for disabling interrupts in CR8)
+        \\  mov cr8, rax                     // Write to CR8 register to disable interrupts at the CPU level
+        \\  sti                              // Set the interrupt flag (IF) to allow interrupts, to ensure interrupts are disabled at the system level
+        \\  ret                              // Return from the function (interrupts are now disabled)
+
+        // Retrieve the local storage value for the current thread (gs:0)
+        \\  .global getLocalStorage
+        \\  getLocalStorage:
+        \\  mov rax, qword ptr gs:0            // Load the value at GS:0 (current thread's local storage)
+        \\  ret                               // Return the value of the local storage (Thread-local data)
+
+        // Simulate a timer interrupt by invoking interrupt vector 0x40
+        \\  .global fakeTimerInterrupt
+        \\  fakeTimerInterrupt:
+        \\  int 0x40                          // Trigger interrupt 0x40 (fake timer interrupt, typically used for a timer service or software interrupts)
+        \\  ret                               // Return from the interrupt simulation
+
+        // Declare an external function `KThreadTerminate` (thread termination function)
+        \\  .extern KThreadTerminate
+
+        // Local function that jumps to the external KThreadTerminate function
+        \\  .global _KThreadTerminate
+        \\  _KThreadTerminate:
+        \\  sub rsp, 8                        // Decrease the stack pointer by 8 to prepare space for the function call
+        \\  jmp KThreadTerminate             // Jump to the external KThreadTerminate function to terminate the thread
+
+        // Retrieve the address of the `KThreadTerminate` function for dynamic function calls
+        \\  .global GetKThreadTerminateAddress
+        \\  GetKThreadTerminateAddress:
+        \\  mov rax, OFFSET _KThreadTerminate // Load the address of the _KThreadTerminate function into RAX
+        \\  ret                               // Return the address in RAX
+
+        // Read the CR3 register (Page Table Base Register) to retrieve the base address of the page tables
+        \\  .global ProcessorReadCR3
+        \\  ProcessorReadCR3:
+        \\  mov rax, cr3                      // Read the current value of CR3 (holds the base address of page tables)
+        \\  ret                               // Return the value of CR3 (Page Table Base Address)
+
+        // Invalidate a single page (flush from the TLB)
+        \\  .global invalidatePage
+        \\  invalidatePage:
+        \\  invlpg [rdi]                   // Invalidate the page at the address pointed to by RDI
+        \\  ret                            // Return from the function after the page is invalidated
     );
 }
 
