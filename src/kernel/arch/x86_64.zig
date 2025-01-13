@@ -455,6 +455,46 @@ comptime {
         \\  mov rax, OFFSET simdSSSE3Support // Address of simdSSSE3Support variable
         \\  and byte ptr [rax], 0       // Mark SSSE3 as unsupported (clear to 0)
         \\.hasSSSE3:
+        // Enable SYSCALL and SYSRET by modifying the MSRs (Model-Specific Registers)
+        \\  mov ecx, 0xC0000080           // MSR for SYSCALL/SYSRET control (Star MSR)
+        \\  rdmsr                        // Read MSR[0xC0000080] into EDX:EAX
+        \\  or eax, 1                    // Set the SYSCALL enable bit (bit 0)
+        \\  wrmsr                        // Write back to MSR[0xC0000080]
+        \\  add ecx, 1                   // Move to the next MSR (LSTAR)
+        \\  rdmsr                        // Read LSTAR MSR (SYSRET return address)
+        \\  mov edx, 0x005B0048          // Set return address for SYSRET (some code segment)
+        \\  wrmsr                        // Write back to LSTAR MSR
+        \\  add ecx, 1                   // Move to the next MSR (CSTAR)
+        \\  mov rdx, OFFSET SyscallEntry // Set the address for SYSCALL handler
+        \\  mov rax, rdx                 // Load the address of the handler into RAX
+        \\  shr rdx, 32                  // Move upper 32 bits to the lower part of RDX
+        \\  wrmsr                        // Write to CSTAR MSR (Call SYSRET entry)
+        \\  add ecx, 2                   // Move to the next MSR (SFMASK)
+        \\  rdmsr                        // Read SFMask MSR (interrupt flags)
+        // Clear direction and interrupt flag when we enter ring 0 (set bits 9 and 10)
+        \\  mov eax, (1 << 10) | (1 << 9)  // Set bits 9 and 10 to clear direction flag and interrupt flag
+        \\  wrmsr                        // Write back to SFMask MSR
+
+        // Assign PAT2 to WC (Write Combining)
+        \\  mov ecx, 0x277               // PAT MSR (0x277) for page attribute table
+        \\  xor rax, rax                 // Clear RAX (to prepare for the PAT modification)
+        \\  xor rdx, rdx                 // Clear RDX
+        \\  rdmsr                        // Read PAT MSR
+        \\  and eax, 0xFFF8FFFF          // Clear bits related to PAT2
+        \\  or eax, 0x00010000           // Set PAT2 to WC (Write Combining)
+        \\  wrmsr                        // Write back to PAT MSR
+
+        // Set up CPU local storage
+        \\  .setupCPULocalStorage:
+        \\  mov ecx, 0xC0000101           // MSR for CPU local storage (FS/GS base addresses)
+        \\  mov rax, OFFSET _cpuLocalStorage // Load address of local storage
+        \\  mov rdx, OFFSET _cpuLocalStorage // Load address of local storage
+        \\  shr rdx, 32                  // Move upper 32 bits of local storage address to the upper part of RDX
+        \\  mov rdi, OFFSET _cpuLocalStorageIdx // Load the local storage index address
+        \\  add rax, [rdi]               // Add index to the base address for local storage
+        // Space for 4 8-byte values at gs:0 - gs:31
+        \\  add qword ptr [rdi], 32           // Update memory at GS:0 (for local storage or thread-specific data)
+        \\  wrmsr                            // Write back to MSR (Model-Specific Register)
     );
 }
 
