@@ -529,6 +529,46 @@ comptime {
         \\  getCurrentThread:
         \\  mov rax, qword ptr gs:16          // Load the current thread's address from GS:16
         \\  ret                              // Return the value of RAX
+        // Global function to get the current RSP (stack pointer)
+        \\  .global ProcessorGetRSP
+        \\  ProcessorGetRSP:
+        \\  mov rax, rsp                     // Load the value of the stack pointer into RAX
+        \\  ret                              // Return the value of RAX
+
+        // Global function to get the current RBP (base pointer)
+        \\  .global ProcessorGetRBP
+        \\  ProcessorGetRBP:
+        \\  mov rax, rbp                     // Load the value of the base pointer into RAX
+        \\  ret                              // Return the value of RAX
+
+        // Halt the CPU (enter HALT state)
+        \\  .global halt
+        \\  halt:
+        \\  cli                              // Clear interrupt flag (disable interrupts)
+        \\  hlt                              // Halt the CPU (infinite loop)
+        \\  jmp halt                         // Jump back to halt to create a loop
+
+        // Global function to check if interrupts are enabled
+        \\  .global areInterruptsEnabled
+        \\  areInterruptsEnabled:
+        \\  pushf                            // Push flags onto the stack
+        \\  pop rax                          // Pop the flags into RAX
+        \\  and rax, 0x200                   // Check the interrupt flag (IF bit)
+        \\  shr rax, 9                       // Shift right to check bit 9 (Interrupt Flag)
+        \\  mov rdx, cr8                     // Check the current value of CR8 (interrupt state)
+        \\  cmp rdx, 0                       // If CR8 is zero, interrupts are disabled
+        \\  je .done                         // Jump to done if interrupts are disabled
+        \\  mov rax, 0                       // Otherwise, set RAX to 0 indicating interrupts are enabled
+        \\  .done:
+        \\  ret                              // Return from the function
+
+        // Enable interrupts
+        \\  .global enableInterrupts
+        \\  enableInterrupts:
+        \\  mov rax, 0                       // Set RAX to 0
+        \\  mov cr8, rax                     // Write to CR8 to enable interrupts
+        \\  sti                              // Set the interrupt flag (enable interrupts)
+        \\  ret                              // Return from the function
     );
 }
 
