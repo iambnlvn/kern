@@ -615,6 +615,42 @@ comptime {
         \\  invalidatePage:
         \\  invlpg [rdi]                   // Invalidate the page at the address pointed to by RDI
         \\  ret                            // Return from the function after the page is invalidated
+
+        // Set the address space by modifying CR3 (Page Table Base Register)
+        \\  .global setAddressSpace
+        \\  setAddressSpace:
+        \\  mov rdi, [rdi]                 // Load the new page directory address into RDI
+        \\  mov rax, cr3                  // Read the current value of CR3 register (Page Table Base Register)
+        \\  cmp rax, rdi                  // Compare the current address with the new address in RDI
+        \\  je .continuation              // If the current address matches, no need to update; jump to continuation
+        \\  mov cr3, rdi                  // Update CR3 to point to the new page table base address
+        \\  .continuation:
+        \\  ret                            // Return from the function after setting the address space
+
+        // Invalidate all pages in the TLB (Translation Lookaside Buffer)
+        \\  .global ProcessorInvalidateAllPages
+        \\  ProcessorInvalidateAllPages:
+        \\  mov rax, cr4                  // Read the current value of CR4 register (control register)
+        \\  and rax, ~(1 << 7)            // Clear the 7th bit of CR4 to disable global paging
+        \\  mov cr4, rax                  // Write the updated value back to CR4
+        \\  or rax, 1 << 7                // Set the 7th bit of CR4 to enable global paging
+        \\  mov cr4, rax                  // Write the updated value back to CR4, effectively invalidating all TLB entries
+        \\  ret                            // Return after invalidating all pages
+
+        // Output a byte to the I/O port (0x80, for example)
+        \\  .global out8
+        \\  out8:
+        \\  mov rdx, rdi                  // Move the I/O port address into RDX
+        \\  mov rax, rsi                  // Move the byte data into RAX
+        \\  out dx, al                    // Output the byte (AL) to the port specified by DX (I/O operation)
+        \\  ret                            // Return after the I/O operation is completed
+        // Read an 8-bit value from an I/O port
+        \\  .global in8
+        \\  in8:
+        \\  mov rdx, rdi                  // Load the I/O port address into RDX (I/O port address is in RDI)
+        \\  xor rax, rax                  // Clear RAX (set it to zero)
+        \\  in al, dx                     // Read an 8-bit value from the I/O port (dx) into the AL register
+        \\  ret                            // Return after the I/O read operation is complete
     );
 }
 
