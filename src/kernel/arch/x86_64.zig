@@ -651,6 +651,37 @@ comptime {
         \\  xor rax, rax                  // Clear RAX (set it to zero)
         \\  in al, dx                     // Read an 8-bit value from the I/O port (dx) into the AL register
         \\  ret                            // Return after the I/O read operation is complete
+        // Write a 16-bit value to an I/O port
+        \\  .global out16
+        \\  out16:
+        \\  mov rdx, rdi                  // Load the I/O port address into RDX
+        \\  mov rax, rsi                  // Load the 16-bit value to write into RAX
+        \\  out dx, ax                    // Write the lower 16 bits of RAX (AX register) to the I/O port specified in DX
+        \\  ret                            // Return after the I/O write operation is complete
+
+        // Read a 16-bit value from an I/O port
+        \\  .global in16
+        \\  in16:
+        \\  mov rdx, rdi                  // Load the I/O port address into RDX
+        \\  xor rax, rax                  // Clear RAX (set it to zero)
+        \\  in ax, dx                     // Read a 16-bit value from the I/O port (dx) into AX
+        \\  ret                            // Return after the I/O read operation is complete
+
+        // Write a 32-bit value to an I/O port
+        \\  .global out32
+        \\  out32:
+        \\  mov rdx, rdi                  // Load the I/O port address into RDX
+        \\  mov rax, rsi                  // Load the 32-bit value to write into RAX
+        \\  out dx, eax                   // Write the lower 32 bits of RAX (EAX register) to the I/O port specified in DX
+        \\  ret                            // Return after the I/O write operation is complete
+
+        // Read a 32-bit value from an I/O port
+        \\  .global in32
+        \\  in32:
+        \\  mov rdx, rdi                  // Load the I/O port address into RDX
+        \\  xor rax, rax                  // Clear RAX (set it to zero)
+        \\  in eax, dx                    // Read a 32-bit value from the I/O port (dx) into EAX
+        \\  ret                            // Return after the I/O read operation is complete
     );
 }
 
