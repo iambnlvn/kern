@@ -829,6 +829,99 @@ comptime {
 
         // Return from the function.
         \\  ret
+
+        // Define a buffer to store the MXCSR value.
+        \\  .buffer: .quad 0              // Reserve 8 bytes (quadword) for the buffer initialized to 0.
+
+        // ProcessorReady: Simulates a processor's idle state after the readiness check.
+
+        \\  .global ProcessorReady
+        \\  ProcessorReady:
+
+        // Set RDI to 1 to simulate a readiness state, signaling the processor is ready for the next operation.
+        \\  mov rdi, 1                    // Set RDI to 1, indicating readiness state.
+
+        // Call the nextTimer function to handle the next timer or processing cycle.
+        \\  call nextTimer                // Call the nextTimer function (assumed to handle time-based actions).
+
+        // Jump to ProcessorIdle function to transition the processor into an idle state.
+        \\  jmp ProcessorIdle             // Jump to ProcessorIdle to mark the processor as idle.
+        // ReturnFromInterruptHandler: Handles the process of restoring state after an interrupt.
+
+        \\  .global ReturnFromInterruptHandler
+        \\  ReturnFromInterruptHandler:
+
+        // Adjust the stack pointer (RSP) to account for the saved state.
+        \\  add rsp, 8                   // Add 8 to RSP to skip over any saved registers.
+        \\  pop rbx                     // Pop the saved value of RBX from the stack.
+        \\  mov ds, bx                  // Restore the DS (Data Segment) register from the value in BX.
+        \\  mov es, bx                  // Restore the ES (Extra Segment) register from the value in BX.
+
+        // Adjust the stack pointer to restore the saved context and handle floating-point registers.
+        \\  add rsp, 512 + 16           // Add space to the stack for the FPU context and any other saved state.
+        \\  mov rbx, rsp                // Set RBX to the current stack pointer.
+        \\  and rbx, ~0xf               // Align RBX to a 16-byte boundary (required for FXSAVE/FXRSTOR).
+
+        // Restore the FPU context.
+        \\  fxrstor [rbx - 512]         // Restore the FPU state from the memory address [RBX - 512].
+
+        // Check the value in AL register and jump to oldThread label if AL is 0.
+        \\  cmp al, 0                   // Compare the AL register with 0.
+        \\  je .oldThread               // If AL is 0, jump to the oldThread label.
+
+        // Initialize the FPU.
+        \\  fninit                      // Initialize the FPU (Floating-Point Unit).
+        \\.oldThread:
+        // Continue to restore the state from the saved stack.
+        \\  pop rax                     // Pop the saved value of RAX from the stack.
+        \\  mov rbx, 0x123456789ABCDEF // Set RBX to a known value for comparison.
+        \\  cmp rax, rbx                // Compare the popped value of RAX with the known value in RBX.
+
+        // Infinite loop until the value in RAX matches the known value.
+        \\  .loop:                     
+        \\  jne .loop                   // If RAX doesn't match RBX, keep looping.
+
+        // Disable interrupts (CLI).
+        \\  cli                         // Clear the interrupt flag (disable interrupts).
+
+        // Pop the remaining saved registers to restore the thread context.
+        \\  pop rax                     // Restore the original value of RAX.
+        \\  mov cr8, rax                // Restore the value of CR8 (interrupt flag register).
+        \\  pop r15                     // Restore the value of R15.
+        \\  pop r14                     // Restore the value of R14.
+        \\  pop r13                     // Restore the value of R13.
+        \\  pop r12                     // Restore the value of R12.
+        \\  pop r11                     // Restore the value of R11.
+        \\  pop r10                     // Restore the value of R10.
+        \\  pop r9                      // Restore the value of R9.
+        \\  pop r8                      // Restore the value of R8.
+        \\  pop rbp                     // Restore the value of RBP (base pointer).
+        \\  pop rdi                     // Restore the value of RDI (destination index).
+        \\  pop rsi                     // Restore the value of RSI (source index).
+        \\  pop rdx                     // Restore the value of RDX (data register).
+        \\  pop rcx                     // Restore the value of RCX (count register).
+        \\  pop rbx                     // Restore the value of RBX (base register).
+        \\  pop rax                     // Restore the value of RAX.
+
+        // Adjust the stack pointer after restoring all registers.
+        \\  add rsp, 16                 // Adjust RSP by 16 bytes to finalize the context restore.
+
+        // Return from interrupt using IRETQ.
+        \\  iretq                       // Return from the interrupt, restoring the state of the processor.
+        // ProcessorIdle: Puts the processor into an idle state.
+
+        \\  .global ProcessorIdle
+        \\  ProcessorIdle:
+
+        // Enable interrupts (STI).
+        \\  sti                         // Set the interrupt flag (enable interrupts).
+
+        // Halt the processor to save power.
+        \\  hlt                         // Halt the processor (put it in idle state).
+
+        // Jump back to ProcessorIdle, creating an infinite idle loop.
+        \\  jmp ProcessorIdle           // Jump back to ProcessorIdle, keeping the CPU idle.
+        \\.global SyscallEntry
     );
 }
 
