@@ -788,6 +788,47 @@ comptime {
 
         // Return from the function.
         \\  ret
+
+        // debutOutByte: Wait for the UART to be ready to send a byte and then output the byte.
+
+        \\  .global debutOutByte
+        \\  debutOutByte:
+
+        // Set DX to the UART port + 5 (typically for checking the 'line status register').
+        \\  mov dx, 0x3f8 + 5             // Set DX to the address of UART line status register.
+
+        // Wait for the UART to be ready to send the next byte.
+        \\  .waitRead:
+        \\  in al, dx                    // Read from the line status register into AL.
+        \\  and al, 0x20                 // Mask all but the 'THRE' (transmitter holding register empty) bit.
+        \\  cmp al, 0                    // Check if the THRE bit is set (UART is ready to transmit).
+        \\  je .waitRead                 // If not ready, loop and wait for the THRE bit to be set.
+
+        // Now that the UART is ready, send the byte stored in RDI.
+        \\  mov dx, 0x3f8 + 0             // Set DX to the UART data register address.
+        \\  mov rax, rdi                 // Load the byte to send into RAX (from RDI).
+        \\  out dx, al                   // Output the byte from AL to the UART data register.
+
+        // Return from the function after transmitting the byte.
+        \\  ret
+
+        // ProcessorReadMXCSR: Reads the MXCSR register (used for controlling SIMD floating-point operations).
+
+        \\  .global ProcessorReadMXCSR
+        \\  ProcessorReadMXCSR:
+
+        // Set RAX to the address of the buffer where the MXCSR value will be stored.
+        \\  mov rax, .buffer              // Load address of buffer into RAX.
+
+        // Store the MXCSR register value into the buffer.
+        \\  stmxcsr [rax]                 // Store MXCSR value into the memory location pointed by RAX.
+
+        // Load the value from the buffer into RAX (to return it or use it further).
+        \\  mov rax, .buffer              // Load the address of the buffer into RAX again.
+        \\  mov rax, [rax]                // Load the value from the buffer into RAX (MXCSR value).
+
+        // Return from the function.
+        \\  ret
     );
 }
 
