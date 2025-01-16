@@ -740,6 +740,54 @@ comptime {
 
         // Return from the function.
         \\  ret
+        // ProcessorSetThreadStorage: Set the thread storage MSR (Model-Specific Register) to store per-thread data
+
+        \\  .global ProcessorSetThreadStorage
+        \\  ProcessorSetThreadStorage:
+
+        // Save the values of RDX and RCX to the stack.
+        \\  push rdx
+        \\  push rcx
+
+        // Prepare the MSR for thread storage.
+        \\  mov rcx, 0xc0000100             // The MSR index for thread storage.
+        \\  mov rdx, rdi                   // RDI holds the value to store in the MSR (thread storage address).
+        \\  mov rax, rdi                   // Copy RDI to RAX as we will use it for the 64-bit value.
+        \\  shr rdx, 32                    // Shift the higher 32 bits of RDX into the low part of the MSR.
+        \\  wrmsr                          // Write the value in RDX:RAX to the MSR.
+
+        // Restore RDX and RCX from the stack.
+        \\  pop rcx
+        \\  pop rdx
+
+        // Return from the function.
+        \\  ret
+        // MMArchSafeCopy: Perform a safe memory copy for the current thread
+
+        \\  .global MMArchSafeCopy
+        \\  MMArchSafeCopy:
+
+        // Call getCurrentThread to obtain the current thread's information.
+        \\  call getCurrentThread
+
+        // Mark the thread as active by setting the first byte of its context.
+        \\  mov byte ptr [rax + 0], 1        // Set the status byte of the current thread to '1' (active).
+
+        // Move the source address (RDX) and destination address (RCX) for the memory copy.
+        \\  mov rcx, rdx                    // Set RCX to the source address (RDX).
+        \\  mov r8, .error                  // Set the destination register (R8) to an error label (used for rep movsb).
+
+        // Use REP MOVSB to copy data from the source address to the destination.
+        \\  rep movsb                       // Copy the bytes from [RCX] to [R8] using REP prefix.
+
+        // After copying, clear the thread's active status.
+        \\  mov byte ptr [rax + 0], 0        // Set the status byte back to '0' (inactive).
+
+        // Set AL to 1 (indicating success).
+        \\  mov al, 1
+
+        // Return from the function.
+        \\  ret
     );
 }
 
