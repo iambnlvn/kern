@@ -682,6 +682,64 @@ comptime {
         \\  xor rax, rax                  // Clear RAX (set it to zero)
         \\  in eax, dx                    // Read a 32-bit value from the I/O port (dx) into EAX
         \\  ret                            // Return after the I/O read operation is complete
+
+        // Read the timestamp counter (TSC)
+        \\  .global ProcessorReadTimeStamp
+        \\  ProcessorReadTimeStamp:
+        \\  rdtsc                          // Read the current timestamp counter (32-bit result in EDX:EAX)
+        \\  shl rdx, 32                    // Shift EDX left by 32 bits to align the high part with the upper 32 bits
+        \\  or rax, rdx                    // Combine the high (EDX) and low (EAX) parts into RAX, forming a 64-bit timestamp
+        \\  ret                            // Return with the timestamp in RAX
+
+        // Set a value in the CPU's local storage (gs segment)
+        \\  .global setLocalStorage
+        \\  setLocalStorage:
+        \\  mov qword ptr gs:0, rdi        // Store the value from RDI into the local storage at GS:0
+        \\  ret                            // Return after setting the local storage value
+        // ProcessorInstallTSS: Install the Task State Segment (TSS) for a given processor
+
+        \\  .global ProcessorInstallTSS
+        \\  ProcessorInstallTSS:
+
+        // Save the value of the RBX register to the stack to preserve its value.
+        \\  push rbx
+
+        // Move the base address of the TSS structure into RAX.
+        \\  mov rax, rdi                    // RDI contains the address of the TSS structure.
+        \\  mov rbx, rsi                    // RSI contains the value to store in the TSS fields.
+
+        // Store the value from RBX into the TSS structure at specific offsets.
+        \\  mov [rax + 56 + 2], bx           // Store the low 16 bits of RBX into offset +58 of the TSS structure.
+        \\  shr rbx, 16                      // Shift RBX right by 16 bits to prepare the next byte.
+        \\  mov [rax + 56 + 4], bl           // Store the next 8 bits (BL) into offset +60 of the TSS structure.
+        \\  shr rbx, 8                       // Shift RBX right by another 8 bits.
+        \\  mov [rax + 56 + 7], bl           // Store the next 8 bits (BL) into offset +63 of the TSS structure.
+        \\  shr rbx, 8                       // Shift RBX right by another 8 bits.
+        \\  mov [rax + 56 + 8], rbx          // Store the remaining 16 bits of RBX into offset +64 of the TSS structure.
+
+        // Load the address of the GDT descriptor into RAX, and set the GDT pointer.
+        \\  mov rax, OFFSET GDTdescriptor2    // Load the address of the second GDT descriptor.
+        \\  add rax, 2                        // Offset the address to point to the actual GDT descriptor.
+        \\  mov rdx, [rax]                    // Store the current value of the descriptor in RDX.
+
+        // Set the GDT descriptor with the address of the TSS.
+        \\  mov [rax], rdi                    // Set the new GDT descriptor to point to the TSS structure.
+
+        // Prepare the GDT with the new descriptor and load it.
+        \\  mov rdi, rax                      // Move the address of the modified descriptor into RDI.
+        \\  sub rdi, 2                        // Subtract 2 to adjust the GDT pointer.
+        \\  lgdt [rdi]                        // Load the GDT (Global Descriptor Table) with the new descriptor.
+
+        // Restore the original value of the GDT descriptor and move the GDT base back.
+        \\  mov [rax], rdx                    // Restore the original descriptor value.
+        \\  mov ax, 0x38                      // Load the TSS segment selector (0x38).
+        \\  ltr ax                            // Load the TSS selector into the Task Register (TR).
+
+        // Restore the value of the RBX register from the stack.
+        \\  pop rbx
+
+        // Return from the function.
+        \\  ret
     );
 }
 
