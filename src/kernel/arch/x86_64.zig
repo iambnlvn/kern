@@ -922,6 +922,65 @@ comptime {
         // Jump back to ProcessorIdle, creating an infinite idle loop.
         \\  jmp ProcessorIdle           // Jump back to ProcessorIdle, keeping the CPU idle.
         \\.global SyscallEntry
+
+        // SyscallEntry: Handles the entry point for a system call.
+
+        \\  .global SyscallEntry
+        \\  SyscallEntry:
+
+        // Set the stack pointer to the value stored in GS:8 (thread-specific data).
+        \\  mov rsp, qword ptr gs:8         // Load the value at gs:8 into the stack pointer (RSP).
+
+        // Enable interrupts.
+        \\  sti                            // Set the interrupt flag (enable interrupts).
+
+        // Set up the data segments to 0x50 (arbitrary segment).
+        \\  mov ax, 0x50                   // Load 0x50 into AX.
+        \\  mov ds, ax                     // Load AX into DS (data segment).
+        \\  mov es, ax                     // Load AX into ES (extra segment).
+
+        // Save the context of the registers before making the syscall.
+        \\  push rcx                       // Push RCX to the stack.
+        \\  push r11                       // Push R11 to the stack.
+        \\  push r12                       // Push R12 to the stack.
+
+        // Set up the stack for the system call.
+        \\  mov rax, rsp                   // Move the current value of RSP into RAX.
+        \\  push rbx                       // Push RBX onto the stack.
+        \\  push rax                       // Push the value of RAX onto the stack.
+
+        // Align the stack pointer to a 16-byte boundary.
+        \\  mov rbx, rsp                   // Load RSP into RBX.
+        \\  and rsp, ~0xF                  // Align the stack pointer to 16-byte boundaries (necessary for certain operations).
+
+        // Call the actual system call function.
+        \\  call Syscall                   // Call the system call handler (Syscall).
+
+        // Restore the stack pointer and context after the syscall.
+        \\  mov rsp, rbx                   // Restore the original value of RSP from RBX.
+        \\  cli                            // Clear the interrupt flag (disable interrupts).
+
+        // Adjust the stack pointer back by 8 bytes to account for the saved RAX.
+        \\  add rsp, 8                     // Adjust the stack pointer by 8 to undo the previous push.
+
+        // Push the return value from the syscall (RAX) and restore the data segments.
+        \\  push rax                       // Push the value of RAX onto the stack (this is the syscall return value).
+        \\  mov ax, 0x63                   // Load 0x63 into AX.
+        \\  mov ds, ax                     // Set DS (data segment) to the value in AX.
+        \\  mov es, ax                     // Set ES (extra segment) to the value in AX.
+
+        // Pop the registers that were saved before the syscall.
+        \\  pop rax                        // Pop the value of RAX from the stack.
+        \\  pop rbx                        // Pop the value of RBX from the stack.
+        \\  pop r12                        // Pop the value of R12 from the stack.
+        \\  pop r11                        // Pop the value of R11 from the stack.
+        \\  pop rcx                        // Pop the value of RCX from the stack.
+
+        // This byte sequence could be a padding byte, specific to the architecture.
+        \\  .byte 0x48                     // This byte could be used as a placeholder or a padding byte.
+
+        // Return from syscall using sysret.
+        \\  sysret                        // Return from the syscall, restoring the previous processor state.
     );
 }
 
