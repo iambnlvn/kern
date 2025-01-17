@@ -33,6 +33,26 @@ var getTimeFromPitMsStarted = false;
 var getTimeFromPitMsLast: u64 = 0;
 var getTimeFromPitMSCumulative: u64 = 0;
 
+export var globalDescriptorTable: GDT align(0x10) linksection(".data") = GDT{
+    .nullntry = GDT.Entry.new(0, 0, 0, 0),
+    .codeEntry = GDT.Entry.new(0xffff, 0, 0xcf9a, 0),
+    .dataEntry = GDT.Entry.new(0xffff, 0, 0xcf92, 0),
+    .codeEntry16 = GDT.Entry.new(0xffff, 0, 0x0f9a, 0),
+    .dataEntry16 = GDT.Entry.new(0xffff, 0, 0x0f92, 0),
+    .userCode = GDT.Entry.new(0xffff, 0, 0xcffa, 0),
+    .userData = GDT.Entry.new(0xffff, 0, 0xcff2, 0),
+    .tss = TSS{ .v1 = 0x68, .v2 = 0, .v3 = 0xe9, .v4 = 0, .v5 = 0 },
+    .codeEntry64 = GDT.Entry.new(0xffff, 0, 0xaf9a, 0),
+    .dataEntry64 = GDT.Entry.new(0xffff, 0, 0xaf92, 0),
+    .userCode64 = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+    .userData64 = GDT.Entry.new(0xffff, 0, 0xaff2, 0),
+    .userCode64c = GDT.Entry.new(0xffff, 0, 0xaffa, 0),
+};
+export var gdtDescriptor2 = GDT.Descriptor{
+    .limit = @sizeOf(GDT) - 1,
+    .base = 0x11000,
+};
+
 pub fn initThread(
     kernelStack: u64,
     kernelStackSize: u64,
@@ -205,6 +225,86 @@ export fn InterruptHandler(ctx: *InterruptContext) callconv(.C) void {
         std.debug.panic("Not implemented", .{});
     }
 }
+export fn installInterruptHandlers() callconv(.C) void {
+    comptime var interruptNum: u64 = 0;
+    inline while (interruptNum < 256) : (interruptNum += 1) {
+        const hasPushedErrCode = comptime switch (interruptNum) {
+            8, 10, 11, 12, 13, 14, 17 => true,
+            else => false,
+        };
+        var handlerAddr = @intFromPtr(InterruptHandlerMaker(interruptNum, hasPushedErrCode).routine);
+
+        _idtData[interruptNum].v1 = @as(u16, @truncate(handlerAddr));
+        _idtData[interruptNum].v2 = 0x48;
+        _idtData[interruptNum].v3 = 0x8e00;
+        handlerAddr >>= 16;
+        _idtData[interruptNum].v4 = @as(u16, @truncate(handlerAddr));
+        handlerAddr >>= 16;
+        _idtData[interruptNum].maskedHandler = handlerAddr;
+    }
+}
+
+fn InterruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
+    return extern struct {
+        fn routine() callconv(.Naked) noreturn {
+            @setRuntimeSafety(false);
+            if (comptime !hasErrorCode) {
+                //push error code if it is not included
+                asm volatile (
+                    \\.intel_syntax noprefix
+                    \\push 0
+                );
+            }
+            //push interrupt number
+            asm volatile (".intel_syntax noprefix\npush " ++ std.fmt.comptimePrint("{}", .{num}));
+            //push general purpose regs onto the stack to save their state
+            asm volatile (
+                \\.intel_syntax noprefix
+                \\cld
+                \\push rax
+                \\push rbx
+                \\push rcx
+                \\push rdx
+                \\push rsi
+                \\push rdi
+                \\push rbp
+                \\push r8
+                \\push r9
+                \\push r10
+                \\push r11
+                \\push r12
+                \\push r13
+                \\push r14
+                \\push r15
+                \\mov rax, cr8
+                \\push rax
+                \\mov rax, 0x123456789ABCDEF
+                \\push rax
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\fxsave [rsp - 512]
+                \\mov rsp, rbx
+                \\sub rsp, 512 + 16
+                \\xor rax, rax
+                \\mov ax, ds
+                \\push rax
+                \\mov ax, 0x10
+                \\mov ds, ax
+                \\mov es, ax
+                \\mov rax, cr2
+                \\push rax
+                \\mov rdi, rsp
+                \\mov rbx, rsp
+                \\and rsp, ~0xf
+                \\call InterruptHandler
+                \\mov rsp, rbx
+                \\xor rax, rax
+                \\jmp ReturnFromInterruptHandler
+            );
+            unreachable;
+        }
+    };
+}
 
 fn handleException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
     if (ctx.intNum == 2) {
@@ -287,67 +387,6 @@ fn handleCrash(ctx: *InterruptContext, currentThread: *Thread) void {
     currentThread.process.?.crash(&crashReason);
 }
 
-fn interruptHandlerMaker(comptime num: u64, comptime hasErrorCode: bool) type {
-    return extern struct {
-        fn routine() callconv(.Naked) noreturn {
-            @setRuntimeSafety(false);
-            if (comptime !hasErrorCode) {
-                //push error code if it is not included
-                asm volatile (
-                    \\.intel_syntax noprefix
-                    \\push 0
-                );
-            }
-            //push interrupt number
-            asm volatile (".intel_syntax noprefix\npush " ++ std.fmt.comptimePrint("{}", .{num}));
-            //push general purpose regs onto the stack to save their state
-            asm volatile (
-                \\.intel_syntax noprefix
-                \\cld
-                \\push rax
-                \\push rbx
-                \\push rcx
-                \\push rdx
-                \\push rsi
-                \\push rdi
-                \\push rbp
-                \\push r8
-                \\push r9
-                \\push r10
-                \\push r11
-                \\push r12
-                \\push r13
-                \\push r14
-                \\push r15
-                \\mov rax, cr8
-                \\push rax
-                \\mov rax, 0x123456789ABCDEF
-                \\push rax
-                \\mov rbx, rsp
-                \\and rsp, ~0xf
-                \\fxsave [rsp - 512]
-                \\mov rsp, rbx
-                \\sub rsp, 512 + 16
-                \\xor rax, rax
-                \\mov ax, ds
-                \\push rax
-                \\mov ax, 0x10
-                \\mov ds, ax
-                \\mov es, ax
-                \\mov rax, cr2
-                \\push rax
-                \\mov rdi, rsp
-                \\mov rbx, rsp
-                \\and rsp, ~0xf
-                \\call InterruptHandler
-                \\mov rsp, rbx
-                \\xor rax, rax
-                \\jmp ReturnFromInterruptHandler
-            );
-            unreachable;
-        }
-    };
-}
 comptime {
     asm (
         \\  .intel_syntax noprefix
@@ -1604,4 +1643,123 @@ pub const MSI = extern struct {
         defer irqHandlersLock.release();
         msiHandlers[tag].callback = null;
     }
+};
+
+const GDT = packed struct {
+    nullEntry: Entry,
+    codeEntry: Entry,
+    dataEntry: Entry,
+    codeEntry16: Entry,
+    dataEntry16: Entry,
+    userCode: Entry,
+    userData: Entry,
+    tss: TSS,
+    codeEntry64: Entry,
+    dataEntry64: Entry,
+    userCode64: Entry,
+    userData64: Entry,
+    userCode64c: Entry,
+
+    const Entry = packed struct {
+        foo1: u32,
+        foo2: u8,
+        foo3: u16,
+        foo4: u8,
+
+        fn new(foo1: u32, foo2: u8, foo3: u16, foo4: u8) @This() {
+            return @This(){
+                .foo1 = foo1,
+                .foo2 = foo2,
+                .foo3 = foo3,
+                .foo4 = foo4,
+            };
+        }
+    };
+
+    const Descriptor = packed struct {
+        limit: u16,
+        base: u64,
+    };
+
+    const WithDescriptor = packed struct {
+        gdt: GDT,
+        descriptor: Descriptor,
+    };
+};
+
+const TSS = packed struct {
+    v1: u32,
+    v2: u8,
+    v3: u16,
+    v4: u8,
+    v5: u64,
+};
+
+pub export var installationID: u128 linksection(".data") = 0;
+export var kernelSize: u32 linksection(".data") = 0;
+pub export var bootloaderID: u64 linksection(".data") = 0;
+pub export var bootloaderInformationOffset: u64 linksection(".data") = 0;
+export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
+export var processorGDTR: u128 align(0x10) linksection(".data") = undefined;
+export fn _start() callconv(.Naked) noreturn {
+    @setRuntimeSafety(false);
+    asm volatile (
+        \\.intel_syntax noprefix
+        \\.extern kernelSize
+        \\mov rax, OFFSET kernelSize
+        \\mov [rax], edx
+        \\xor rdx, rdx
+        \\mov rax, 0x63
+        \\mov fs, ax
+        \\mov gs, ax
+        \\// save bootloader id
+        \\mov rax, OFFSET bootloaderID
+        \\mov [rax], rsi
+        \\cmp rdi, 0
+        \\jne .standard_acpi
+        \\mov rax, 0x7fe8
+        \\mov [rax], rdi
+        \\.standard_acpi:
+        \\mov rax, OFFSET bootloaderInformationOffset
+        \\mov [rax], rdi
+
+        // Stack size: 0x4000
+        \\mov rsp, OFFSET _stack + 0x4000
+        \\
+        \\mov rbx, OFFSET installationID
+        \\mov rax, [rdi + 0x7ff0]
+        \\mov [rbx], rax
+        \\mov rax, [rdi + 0x7ff8]
+        \\mov [rbx + 8], rax
+        \\// unmap the identity paging the bootloader used
+        \\mov rax, 0xFFFFFF7FBFDFE000
+        \\mov qword ptr [rax], 0
+        \\mov rax, cr3
+        \\mov cr3, rax
+        \\call PCSetupCOM1
+        \\call PCDisablePIC
+        \\call PCProcessMemoryMap
+        \\call installInterruptHandlers
+        \\
+        \\mov rcx, OFFSET processorGDTR
+        \\sgdt [rcx]
+        \\
+        \\call CPU_setup_1
+        \\
+        \\and rsp, ~0xf
+        \\call KernelInitialise
+        \\jmp ProcessorReady
+    );
+    unreachable;
+}
+
+export var _idtData: [idtEntryCount]IDTEntry align(0x1000) linksection(".bss") = undefined;
+const idtEntryCount = 0x1000 / @sizeOf(IDTEntry);
+
+const IDTEntry = packed struct {
+    v1: u16,
+    v2: u16,
+    v3: u16,
+    v4: u16,
+    maskedHandler: u64,
 };
