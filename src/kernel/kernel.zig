@@ -5,6 +5,7 @@ const Scheduler = scheduling.Scheduler;
 pub const ds = @import("ds.zig");
 pub const WAIT_NO_TIMEOUT = std.math.maxInt(u64);
 pub const MAX_WAIT_COUNT = 8;
+pub const MAX_PROCS = 256;
 pub const sync = @import("sync.zig");
 pub const memory = @import("memory.zig");
 pub const object = @import("obj.zig");

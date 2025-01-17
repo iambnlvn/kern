@@ -162,7 +162,9 @@ pub extern fn out16(port: u16, value: u16) callconv(.C) void;
 pub extern fn in16(port: u16) callconv(.C) u16;
 pub extern fn out32(port: u16, value: u32) callconv(.C) void;
 pub extern fn in32(port: u16) callconv(.C) u32;
-
+extern fn GetAsyncTaskThreadAddress() callconv(.C) u64;
+pub extern fn setLocalStorage(ls: *LocalStorage) callconv(.C) void;
+pub extern fn ProcessorInstallTSS(gdt: u64, tss: u64) callconv(.C) void;
 pub extern fn setAddressSpace(AddressSpace: *memory.AddressSpace) callconv(.C) void;
 
 pub const LocalStorage = extern struct {
@@ -1763,3 +1765,99 @@ const IDTEntry = packed struct {
     v4: u16,
     maskedHandler: u64,
 };
+
+pub export fn EarlyDelay1Ms() callconv(.C) void {
+    out8(IO_PIT_COMMAND, 0x30);
+    out8(IO_PIT_DATA, 0xa9);
+    out8(IO_PIT_DATA, 0x04);
+
+    while (true) {
+        out8(IO_PIT_COMMAND, 0xe2);
+
+        if (in8(IO_PIT_DATA) & (1 << 7) != 0) break;
+    }
+}
+const NewProcessorStorage = extern struct {
+    local: *LocalStorage,
+    gdt: u64,
+
+    fn allocate(cpu: *CPU) @This() {
+        var storage: @This() = undefined;
+        storage.local = @as(*LocalStorage, @ptrFromInt(kernel.heapFixed.alloc(@sizeOf(LocalStorage), true)));
+        const gdtPA = memory.physicalAllocFlagged(memory.Physical.Flags.fromFlag(.commitNow));
+        storage.gdt = kernel.addrSpace.mapPhysical(gdtPA, pageSize, memory.Region.Flags.empty());
+        storage.local.cpu = cpu;
+        cpu.local = storage.local;
+        storage.local.asyncTaskThread = Thread.spawn(GetAsyncTaskThreadAddress(), 0, Thread.Flags.fromFlag(.asyncTask), null, 0);
+        storage.local.idleThread = Thread.spawn(0, 0, Thread.Flags.fromFlag(.idle), null, 0);
+        storage.local.currentThread = storage.local.idleThread;
+        storage.local.processorID = @as(u32, @intCast(@atomicRmw(@TypeOf(kernel.scheduler.nextProcID), &kernel.scheduler.nextProcID, .Add, 1, .SeqCst)));
+        if (storage.local.processorID >= kernel.MAX_PROCS) kernel.panic("cpu max count exceeded");
+        cpu.kernelProcessorID = @as(u8, @intCast(storage.local.processorID));
+        return storage;
+    }
+};
+
+pub export var timeStampTicksPerMs: u64 = undefined;
+
+pub fn init() callconv(.C) void {
+    ACPI.driver.parseTables();
+
+    const bootstrapLAPIC_ID = @as(u8, @intCast(LAPIC.read(0x20 >> 2) >> 24));
+
+    const currentCPU = blk: {
+        for (ACPI.driver.procs[0..ACPI.driver.procCount]) |*processor| {
+            if (processor.APICID == bootstrapLAPIC_ID) {
+                processor.isbootProcessor = true;
+                break :blk processor;
+            }
+        }
+
+        kernel.panic("could not find the bootstrap processor");
+    };
+
+    disableInterrupts();
+    const start = ProcessorReadTimeStamp();
+    LAPIC.write(0x380 >> 2, std.math.maxInt(u32));
+    var i: u64 = 0;
+    while (i < 8) : (i += 1) {
+        EarlyDelay1Ms();
+    }
+    ACPI.driver.LAPICTicksPerMS = (std.math.maxInt(u32) - LAPIC.read(0x390 >> 2)) >> 4;
+    kernel.rng.addEntropy(LAPIC.read(0x390 >> 2));
+
+    const end = ProcessorReadTimeStamp();
+    timeStampTicksPerMs = (end - start) >> 3;
+    enableInterrupts();
+
+    var storage = NewProcessorStorage.allocate(currentCPU);
+    SetupProcessor2(&storage);
+}
+
+export fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void {
+    for (ACPI.driver.LAPICNMIs[0..ACPI.driver.LAPICNMICount]) |*nmi| {
+        if (nmi.proc == 0xff or nmi.proc == storage.local.cpu.?.processorID) {
+            const regIdx = (0x350 + (@as(u8, @intCast(nmi.lintIndex)) << 4)) >> 2;
+            var value: u32 = 2 | (1 << 10);
+            if (nmi.isActiveLow) value |= 1 << 13;
+            if (nmi.isLevelTriggered) value |= 1 << 15;
+            LAPIC.write(regIdx, value);
+        }
+    }
+
+    LAPIC.write(0x350 >> 2, LAPIC.read(0x350 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x360 >> 2, LAPIC.read(0x360 >> 2) & ~@as(u32, 1 << 16));
+    LAPIC.write(0x080 >> 2, 0);
+    if (LAPIC.read(0x30 >> 2) & 0x80000000 != 0) LAPIC.write(0x410 >> 2, 0);
+    LAPIC.endOfInterrupt();
+
+    LAPIC.write(0x3e0 >> 2, 2);
+    setLocalStorage(storage.local);
+
+    const gdt = storage.gdt;
+    const bootstrap_GDT = @as(*align(1) u64, @ptrFromInt((@intFromPtr(&processorGDTR) + @sizeOf(u16)))).*;
+    kernel.EsMemoryCopy(gdt, bootstrap_GDT, 2048);
+    const tss = gdt + 2048;
+    storage.local.cpu.?.kernelStack = @as(*align(1) u64, @ptrFromInt(tss + @sizeOf(u32)));
+    ProcessorInstallTSS(gdt, tss);
+}
