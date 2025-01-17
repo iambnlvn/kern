@@ -389,6 +389,12 @@ fn handleCrash(ctx: *InterruptContext, currentThread: *Thread) void {
     currentThread.process.?.crash(&crashReason);
 }
 
+export var pagingNXESupport: u32 linksection(".data") = 1;
+export var pagingSMEPSupport: u32 linksection(".data") = 1;
+export var pagingPCIDSupport: u32 linksection(".data") = 1;
+export var pagingTCESupport: u32 linksection(".data") = 1;
+export var simdSSE3Support: u32 linksection(".data") = 1;
+export var simdSSSE3Support: u32 linksection(".data") = 1;
 comptime {
     asm (
         \\  .intel_syntax noprefix
@@ -830,10 +836,10 @@ comptime {
         // Return from the function.
         \\  ret
 
-        // debutOutByte: Wait for the UART to be ready to send a byte and then output the byte.
+        // debugOutByte: Wait for the UART to be ready to send a byte and then output the byte.
 
-        \\  .global debutOutByte
-        \\  debutOutByte:
+        \\  .global debugOutByte
+        \\  debugOutByte:
 
         // Set DX to the UART port + 5 (typically for checking the 'line status register').
         \\  mov dx, 0x3f8 + 5             // Set DX to the address of UART line status register.
