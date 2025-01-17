@@ -198,16 +198,16 @@ pub const AddressSpace = extern struct {
     commitedPagePerTable: u64,
     activePageTableCount: u64,
     mutex: Mutex,
-};
-const Commit = extern struct {
-    L1: [*]u8,
-    commitL1: [L1_COMMIT_SIZE]u8,
-    L2: [L2_COMMIT_SIZE]u8,
-    L3: [L3_COMMIT_SIZE]u8,
-
     const L1_COMMIT_SIZE = 1 << 8;
     const L2_COMMIT_SIZE = 1 << 14;
     const L3_COMMIT_SIZE = 1 << 5;
+};
+
+const Commit = extern struct {
+    L1: [*]u8,
+    commitL1: [AddressSpace.L1_COMMIT_SIZE]u8,
+    L2: [AddressSpace.L2_COMMIT_SIZE]u8,
+    L3: [AddressSpace.L3_COMMIT_SIZE]u8,
 };
 
 export fn InterruptHandler(ctx: *InterruptContext) callconv(.C) void {
@@ -1866,4 +1866,56 @@ export fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void {
     const tss = gdt + 2048;
     storage.local.cpu.?.kernelStack = @as(*align(1) u64, @ptrFromInt(tss + @sizeOf(u32)));
     ProcessorInstallTSS(gdt, tss);
+}
+
+export var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entryPerPageTableBitCount + pageBitCount + 3)]u8 = undefined;
+
+pub fn initMemory() callconv(.C) void {
+    const cr3 = ProcessorReadCR3();
+    kernel.addrSpace.arch.cr3 = cr3;
+    kernel.coreAddressSpace.arch.cr3 = cr3;
+
+    kernel.mmCoreRegions[0].descriptor.baseAddr = coreAddrSpaceStart;
+    kernel.mmCoreRegions[0].descriptor.pageCount = coreAddrSpaceSize / pageSize;
+
+    var i: u64 = 0x100;
+    while (i < 0x200) : (i += 1) {
+        if (PageTables.accessAt(.level4, i).* == 0) {
+            PageTables.accessAt(.level4, i).* = memory.physicalAllocFlagged(memory.Physical.Flags.empty()) | 0b11;
+            kernel.EsMemoryZero(@intFromPtr(PageTables.accessAt(.level3, i * 0x200)), pageSize);
+        }
+    }
+
+    kernel.coreAddressSpace.arch.commit.L1 = &core_L1_commit;
+    _ = kernel.coreAddressSpace.reserveMutex.acquire();
+    kernel.addrSpace.arch.commit.L1 = @as([*]u8, @ptrFromInt(kernel.coreAddressSpace.reserve(AddressSpace.L1_commit_size, memory.Region.Flags.fromFlags(.{ .normal, .noCommitTracking, .fixed }), 0).?.descriptor.baseAddr));
+    kernel.coreAddressSpace.reserveMutex.release();
+}
+
+pub export var physicalMemoryRegions: [*]memory.Physical.MemoryRegion = undefined;
+pub export var physicalMemoryRegionsCount: u64 = undefined;
+pub export var physicalMemoryRegionsIndex: u64 = undefined;
+pub export var physicalMemoryHighest: u64 = undefined;
+pub export var physicalMemoryRegionsPagesCount: u64 = undefined;
+
+pub export fn EarlyAllocatePage() callconv(.C) u64 {
+    const index = blk: {
+        for (physicalMemoryRegions[0..physicalMemoryRegionsCount], 0..) |*region, regionIdx| {
+            if (region.pageCount != 0) {
+                break :blk physicalMemoryRegionsIndex + regionIdx;
+            }
+        }
+
+        kernel.panic("Unable to early allocate a page\n");
+    };
+
+    const region = &physicalMemoryRegions[index];
+    const page = region.baseAddr;
+
+    region.baseAddr += pageSize;
+    region.pageCount -= 1;
+    physicalMemoryRegionsPagesCount -= 1;
+    physicalMemoryRegionsIndex = index;
+
+    return page;
 }

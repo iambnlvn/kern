@@ -691,6 +691,7 @@ const ObjectCache = extern struct {
     const trimGroupeCount = 1024;
 };
 pub const Physical = extern struct {
+    pub const MemoryRegion = Region.Descriptor;
     pub const Allocator = extern struct {
         pageFrames: [*]PageFrame,
         pageFrameDBInitialized: bool,
