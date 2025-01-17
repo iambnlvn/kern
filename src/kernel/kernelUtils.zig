@@ -29,4 +29,18 @@ pub const RandomNumberGenerator = extern struct {
             @fence(.SeqCst);
         }
     };
+
+    pub fn addEntropy(self: *@This(), n: u64) void {
+        self.lock.acquire();
+        @setRuntimeSafety(false);
+        var x = n;
+
+        for (self.s) |*s| {
+            x += 0x9E3779B97F4A7C15;
+            x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9;
+            x = (x ^ (x >> 27)) * 0x94D049BB133111EB;
+            s.* ^= x ^ (x >> 31);
+        }
+        self.lock.release();
+    }
 };
