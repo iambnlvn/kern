@@ -1919,3 +1919,62 @@ pub export fn EarlyAllocatePage() callconv(.C) u64 {
 
     return page;
 }
+
+export fn PCProcessMemoryMap() callconv(.C) void {
+    physicalMemoryRegions = @as([*]memory.Physical.MemoryRegion, @ptrFromInt(lowMemMapStart + 0x60000 + bootloaderInformationOffset));
+
+    var regionIdx: u64 = 0;
+    while (physicalMemoryRegions[regionIdx].baseAddr != 0) : (regionIdx += 1) {
+        const region = &physicalMemoryRegions[regionIdx];
+        const end = region.baseAddr + (region.pageCount << pageBitCount);
+        physicalMemoryRegionsPagesCount += region.pageCount;
+        if (end > physicalMemoryHighest) physicalMemoryHighest = end;
+        physicalMemoryRegionsCount += 1;
+    }
+
+    physicalMemoryRegionsPagesCount = physicalMemoryRegions[physicalMemoryRegionsCount].pageCount;
+}
+
+const IO_UNUSED_DELAY = (0x0080);
+const IO_COM_1 = (0x03F8); // To 0x03FF.;
+
+export fn PCSetupCOM1() callconv(.C) void {
+    ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
+    ProcessorOut8Delayed(IO_COM_1 + 3, 0x80);
+    ProcessorOut8Delayed(IO_COM_1 + 0, 0x03);
+    ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
+    ProcessorOut8Delayed(IO_COM_1 + 3, 0x03);
+    ProcessorOut8Delayed(IO_COM_1 + 2, 0xC7);
+    ProcessorOut8Delayed(IO_COM_1 + 4, 0x0B);
+
+    // Print a divider line.
+    var i: u64 = 0;
+    while (i < 10) : (i += 1) {
+        debugOutByte('-');
+    }
+    debugOutByte('\r');
+    debugOutByte('\n');
+}
+
+export fn ProcessorOut8Delayed(port: u16, value: u8) callconv(.C) void {
+    out8(port, value);
+    _ = in8(IO_UNUSED_DELAY);
+}
+
+const IO_PIC_1_COMMAND = (0x0020);
+const IO_PIC_1_DATA = (0x0021);
+const IO_PIC_2_COMMAND = (0x00A0);
+const IO_PIC_2_DATA = (0x00A1);
+pub export fn PCDisablePIC() callconv(.C) void {
+    ProcessorOut8Delayed(IO_PIC_1_COMMAND, 0x11);
+    ProcessorOut8Delayed(IO_PIC_2_COMMAND, 0x11);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x20);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x28);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x04);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x02);
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0x01);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0x01);
+
+    ProcessorOut8Delayed(IO_PIC_1_DATA, 0xFF);
+    ProcessorOut8Delayed(IO_PIC_2_DATA, 0xFF);
+}
