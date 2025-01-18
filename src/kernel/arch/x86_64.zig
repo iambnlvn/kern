@@ -155,6 +155,9 @@ pub extern fn invalidatePage(page: u64) callconv(.C) void;
 pub extern fn ProcessorReadCR3() callconv(.C) u64;
 pub extern fn EarlyAllocPage() callconv(.C) u64;
 extern fn MMArchSafeCopy(dest: u64, source: u64, byteCount: u64) callconv(.C) bool;
+pub extern fn GetKThreadTerminateAddress() callconv(.C) u64;
+pub extern fn GetMMZeroPageThreadAddress() callconv(.C) u64;
+pub extern fn GetMMBalanceThreadAddress() callconv(.C) u64;
 pub extern fn ProcessorInvalidateAllPages() callconv(.C) void;
 pub const KIRQHandler = fn (interruptIdx: u64, ctx: u64) callconv(.C) bool;
 pub extern fn out8(port: u16, value: u8) callconv(.C) void;
@@ -200,9 +203,9 @@ pub const AddressSpace = extern struct {
     commitedPagePerTable: u64,
     activePageTableCount: u64,
     mutex: Mutex,
-    const L1_COMMIT_SIZE = 1 << 8;
-    const L2_COMMIT_SIZE = 1 << 14;
-    const L3_COMMIT_SIZE = 1 << 5;
+    pub const L1_COMMIT_SIZE = 1 << 8;
+    pub const L2_COMMIT_SIZE = 1 << 14;
+    pub const L3_COMMIT_SIZE = 1 << 5;
 };
 
 const Commit = extern struct {
@@ -2097,6 +2100,49 @@ comptime {
         \\.global GetKernelMainAddress
         \\GetKernelMainAddress:
         \\mov rax, OFFSET KernelMain
+        \\ret
+    );
+}
+
+pub const userSpaceStart = 0x100000000000;
+pub const userSpaceSize = 0xF00000000000 - 0x100000000000;
+pub export fn initUserSpace(space: *memory.AddressSpace, region: *memory.Region) callconv(.C) bool {
+    region.descriptor.baseAddr = userSpaceStart;
+    region.descriptor.pageCount = userSpaceSize / pageSize;
+
+    if (!memory.commit(pageSize, true)) return false;
+
+    space.arch.cr3 = memory.physicalAllocFlagged(memory.Physical.Flags.empty());
+
+    {
+        _ = kernel.coreAddressSpace.reserveMutex.acquire();
+        defer kernel.coreAddressSpace.reserveMutex.release();
+
+        const L1_region = kernel.coreAddressSpace.reserve(AddressSpace.L1_COMMIT_SIZE, memory.Region.Flags.fromFlags(.{ .normal, .noCommitTracking, .fixed }), 0) orelse return false;
+        space.arch.commit.L1 = @as([*]u8, @ptrFromInt(L1_region.descriptor.baseAddr));
+    }
+
+    const pageTableAddr = @as(?[*]u64, @ptrFromInt(kernel.addrSpace.mapPhysical(space.arch.cr3, pageSize, memory.Region.Flags.empty()))) orelse kernel.panic("Expected page table allocation to be good");
+    kernel.EsMemoryZero(@intFromPtr(pageTableAddr), pageSize / 2);
+    kernel.EsMemoryCopy(@intFromPtr(pageTableAddr) + (0x100 * @sizeOf(u64)), @intFromPtr(PageTables.accessAt(.level4, 0x100)), pageSize / 2);
+    pageTableAddr[512 - 2] = space.arch.cr3 | 0b11;
+    _ = kernel.addrSpace.free(@intFromPtr(pageTableAddr), 0, false);
+
+    return true;
+}
+
+comptime {
+    asm (
+        \\.intel_syntax noprefix
+        \\.global GetMMZeroPageThreadAddress
+        \\.extern MMZeroPageThread
+        \\GetMMZeroPageThreadAddress:
+        \\mov rax, OFFSET MMZeroPageThread
+        \\ret
+        \\.global GetMMBalanceThreadAddress
+        \\.extern MMBalanceThread
+        \\GetMMBalanceThreadAddress:
+        \\mov rax, OFFSET MMBalanceThread
         \\ret
     );
 }
