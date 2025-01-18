@@ -2146,3 +2146,36 @@ comptime {
         \\ret
     );
 }
+
+pub export fn FindRootSystemDescriptorPointer() callconv(.C) u64 {
+    const UEFI_RSDP = @as(*u64, @ptrFromInt(lowMemMapStart + bootloaderInformationOffset + 0x7fe8)).*;
+    if (UEFI_RSDP != 0) return UEFI_RSDP;
+
+    var searchRegions: [2]memory.Physical.MemoryRegion = undefined;
+    searchRegions[0].baseAddr = @as(u64, @as(*u16, @ptrFromInt(lowMemMapStart + 0x40e * @sizeOf(u16))).* << 4) + lowMemMapStart;
+    searchRegions[0].pageCount = 0x400;
+    searchRegions[1].baseAddr = 0xe0000 + lowMemMapStart;
+    searchRegions[1].pageCount = 0x20000;
+
+    for (searchRegions) |searchReg| {
+        var address = searchReg.baseAddr;
+        while (address < searchReg.baseAddr + searchReg.pageCount) : (address += 16) {
+            const rsdp = @as(*ACPI.RootSystemDescriptorPointer, @ptrFromInt(address));
+
+            if (rsdp.signature != ACPI.RootSystemDescriptorPointer.signature) {
+                continue;
+            }
+
+            if (rsdp.revision == 0) {
+                if (kernel.EsMemorySumBytes(@as([*]u8, @ptrCast(rsdp)), 20) != 0) continue;
+
+                return @intFromPtr(rsdp) - lowMemMapStart;
+            } else if (rsdp.revision == 2) {
+                if (kernel.EsMemorySumBytes(@as([*]u8, @ptrCast(rsdp)), @sizeOf(ACPI.RootSystemDescriptorPointer)) != 0) continue;
+                return @intFromPtr(rsdp) - lowMemMapStart;
+            }
+        }
+    }
+
+    return 0;
+}
