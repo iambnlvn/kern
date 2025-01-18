@@ -163,6 +163,7 @@ pub extern fn in16(port: u16) callconv(.C) u16;
 pub extern fn out32(port: u16, value: u32) callconv(.C) void;
 pub extern fn in32(port: u16) callconv(.C) u32;
 extern fn GetAsyncTaskThreadAddress() callconv(.C) u64;
+pub extern fn ProcessorSetThreadStorage(tlsAddr: u64) callconv(.C) void;
 pub extern fn setLocalStorage(ls: *LocalStorage) callconv(.C) void;
 pub extern fn ProcessorInstallTSS(gdt: u64, tss: u64) callconv(.C) void;
 pub extern fn setAddressSpace(AddressSpace: *memory.AddressSpace) callconv(.C) void;
@@ -1977,4 +1978,55 @@ pub export fn PCDisablePIC() callconv(.C) void {
 
     ProcessorOut8Delayed(IO_PIC_1_DATA, 0xFF);
     ProcessorOut8Delayed(IO_PIC_2_DATA, 0xFF);
+}
+
+export fn ContextSanityCheck(context: *InterruptContext) callconv(.C) void {
+    if (context.cs > 0x100 or
+        context.ds > 0x100 or
+        context.ss > 0x100 or
+        (context.rip >= 0x1000000000000 and context.rip < 0xFFFF000000000000) or
+        (context.rip < 0xFFFF800000000000 and context.cs == 0x48))
+    {
+        kernel.panic("Context sanity check failed");
+    }
+}
+
+export fn PostContextSwitch(context: *InterruptContext, oldAddrSpace: *memory.AddressSpace) callconv(.C) bool {
+    if (kernel.scheduler.dispatchSpinLock.interruptsEnabled.readVolatile()) kernel.panic("Interrupts were enabled");
+
+    kernel.scheduler.dispatchSpinLock.releaseEx(true);
+
+    const currentThread = getCurrentThread().?;
+    const local = getLocalStorage().?;
+    local.cpu.?.kernelStack.* = currentThread.kernelStack;
+
+    const newThread = currentThread.cpuTimeSlices.readVolatile() == 1;
+    LAPIC.endOfInterrupt();
+    ContextSanityCheck(context);
+    ProcessorSetThreadStorage(currentThread.tlsAddr);
+    oldAddrSpace.closeRef();
+    currentThread.lastKnowExecAddr = context.rip;
+
+    if (areInterruptsEnabled()) kernel.panic("interrupts were enabled");
+
+    if (local.spinlockCount != 0) kernel.panic("spinlock count is not zero");
+
+    currentThread.timerAdjustTicks += ProcessorReadTimeStamp() - local.currentThread.?.lastInterruptTicks;
+
+    if (currentThread.timerAdjustAddr != 0 and MMArchIsBufferInUserRange(currentThread.timerAdjustAddr, @sizeOf(u64))) {
+        _ = MMArchSafeCopy(currentThread.timerAdjustAddr, @intFromPtr(&local.currentThread.?.timerAdjustTicks), @sizeOf(u64));
+    }
+
+    return newThread;
+}
+
+comptime {
+    asm (
+        \\.intel_syntax noprefix
+        \\.global GetAsyncTaskThreadAddress
+        \\.extern AsyncTaskThread
+        \\GetAsyncTaskThreadAddress:
+        \\mov rax, OFFSET AsyncTaskThread
+        \\ret
+    );
 }
