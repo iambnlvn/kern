@@ -7,6 +7,7 @@ const zeroes = kernel.zeroes;
 const memory = kernel.memory;
 const Volatile = kernel.Volatile;
 const ACPI = @import("../drivers/ACPI.zig");
+const syscall = @import("../syscall.zig");
 pub const kernelAddrSpaceStart = 0xFFFF900000000000;
 pub const kernelAddrSpaceSize = 0xFFFFF00000000000 - 0xFFFF900000000000;
 pub const pageSize = 0x1000;
@@ -2027,6 +2028,75 @@ comptime {
         \\.extern AsyncTaskThread
         \\GetAsyncTaskThreadAddress:
         \\mov rax, OFFSET AsyncTaskThread
+        \\ret
+    );
+}
+
+const syscallFunctions = [syscall.Type.count + 1]syscall.Func{
+    kernel.syscall.procExit,
+    undefined,
+    undefined,
+};
+
+export fn DoSyscall(index: syscall.Type, arg0: u64, arg1: u64, arg2: u64, arg3: u64, isBatched: bool, fatal: ?*bool, userStackPtr: ?*u64) callconv(.C) u64 {
+    enableInterrupts();
+
+    const currentThread = getCurrentThread().?;
+    const currentProcess = currentThread.process;
+    const currentAddrSpace = currentProcess.addrSpace;
+
+    if (!isBatched) {
+        if (currentThread.terminating.readVolatile()) {
+            fakeTimerInterrupt();
+        }
+
+        if (currentThread.terminatableState.readVolatile() != .terminatable) kernel.panic("Current thread was not terminatable");
+
+        currentThread.terminatableState.writeVolatile(.inSyscall);
+    }
+
+    var returnVal: u64 = @intFromEnum(kernel.FatalError.unknownSyscall);
+    var isFatalError = true;
+
+    const function = syscallFunctions[@intFromEnum(index)];
+    if (isBatched and index == .batch) {} else {
+        returnVal = function(arg0, arg1, arg2, arg3, currentThread, currentProcess, currentAddrSpace, userStackPtr, @as(*u8, @ptrCast(&isFatalError)));
+    }
+
+    if (fatal) |fatal_u| fatal_u.* = false;
+
+    if (isFatalError) {
+        if (fatal) |fatal_u| fatal_u.* = true else {
+            var reason = zeroes(kernel.CrashReason);
+            reason.errorCode = @as(kernel.FatalError, @enumFromInt(returnVal));
+            reason.duringSysCall = @as(i32, @bitCast(@intFromEnum(index)));
+            currentProcess.crash(&reason);
+        }
+    }
+
+    if (!isBatched) {
+        currentThread.terminatableState.writeVolatile(.terminatable);
+        if (currentThread.terminating.readVolatile() or currentThread.paused.readVolatile()) {
+            fakeTimerInterrupt();
+        }
+    }
+
+    return returnVal;
+}
+
+export fn Syscall(arg0: u64, arg1: u64, arg2: u64, returnAddr: u64, arg3: u64, argument4: u64, userStackPtr: ?*u64) callconv(.C) u64 {
+    _ = returnAddr;
+    return DoSyscall(@as(syscall.Type, @enumFromInt(arg0)), arg1, arg2, arg3, argument4, false, null, userStackPtr);
+}
+
+pub extern fn GetKernelMainAddress() callconv(.C) u64;
+comptime {
+    asm (
+        \\.intel_syntax noprefix
+        \\.extern KernelMain
+        \\.global GetKernelMainAddress
+        \\GetKernelMainAddress:
+        \\mov rax, OFFSET KernelMain
         \\ret
     );
 }
