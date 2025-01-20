@@ -193,6 +193,38 @@ pub export fn EsMemorySumBytes(source: [*]u8, byteCount: u64) callconv(.C) u8 {
     return @as(u8, @truncate(total));
 }
 
+pub const Workgroup = extern struct {
+    remaining: Volatile(u64),
+    success: Volatile(u64),
+    event: sync.Event,
+
+    pub fn init(self: *@This()) void {
+        self.remaining.writeVolatile(1);
+        self.success.writeVolatile(1);
+        self.event.reset();
+    }
+
+    pub fn wait(self: *@This()) bool {
+        if (self.remaining.atomicFetchSub(1) != 1) _ = self.event.wait();
+        if (self.remaining.readVolatile() != 0) panic("Expected remaining operations to be 0 after event set");
+
+        return self.success.readVolatile() != 0;
+    }
+
+    pub fn start(self: *@This()) void {
+        if (self.remaining.atomicFetchAdd(1) == 0) panic("Could not start operation on completed dispatch group");
+    }
+
+    pub fn end(self: *@This(), success: bool) void {
+        if (!success) {
+            self.success.writeVolatile(0);
+            @fence(.SeqCst);
+        }
+
+        if (self.remaining.atomicFetchSub(1) == 1) _ = self.event.set(false);
+    }
+};
+
 pub const GlobalData = extern struct {
     clickChainTimeoutMS: Volatile(i32),
     doubleClickTimeoutMS: Volatile(i32),
