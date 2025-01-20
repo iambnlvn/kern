@@ -927,7 +927,7 @@ pub const AsyncTask = extern struct {
     }
 };
 
-const Timer = extern struct {
+pub const Timer = extern struct {
     event: Event,
     asyncTask: AsyncTask,
     node: LinkedList(Timer).Node,

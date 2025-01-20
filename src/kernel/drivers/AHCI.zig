@@ -53,3 +53,74 @@ const MBR = extern struct {
         present: bool,
     };
 };
+
+pub const Driver = struct {
+    drives: []Drive,
+    mbrPartitions: [4]MBR.Partition,
+    mbrPartitionsCount: u64,
+    partitionDevices: []PartitionDevice,
+    capabilities: u32,
+    cap2: u32,
+    commandSlotCount: u64,
+    timeoutTimer: kernel.scheduling.Timer,
+    isDm64Supported: bool,
+    ports: [MAX_PORT_COUNT]Port,
+
+    const Port = extern struct {
+        connected: bool,
+        atapi: bool,
+        ssd: bool,
+
+        cmdList: [*]u32,
+        cmdTables: [*]u8,
+        sectorByteCount: u64,
+        sectorCount: u64,
+
+        cmdStartTimestamps: [32]u64,
+        runningCmds: u32,
+
+        cmdSpinlock: kernel.sync.SpinLock,
+        cmdSlotsAvailableEvent: kernel.sync.Event,
+
+        model: [41]u8,
+    };
+
+    const MAX_PORT_COUNT = 32;
+};
+
+// TODO!: Implement this
+const PartitionDevice = extern struct {
+    sectorOffset: u64,
+};
+
+pub const Drive = extern struct {
+    blockDevice: BlockDevice,
+    port: u64,
+
+    const maxCount = 64;
+};
+
+const DriveType = enum(u8) {
+    other = 0,
+    hdd = 1,
+    ssd = 2,
+    cdrom = 3,
+    usbStorage = 4,
+};
+
+const BlockDevice = extern struct {
+    access: u64,
+    sectorSize: u64,
+    sectorCount: u64,
+    readOnly: bool,
+    nestLevel: u8,
+    driveType: DriveType,
+    modelBytes: u8,
+    model: [64]u8,
+    maxAccessSectorCount: u64,
+    signatureBlock: [*]u8,
+    detectFilesystemMutex: Mutex,
+
+    const read = 0;
+    const write = 1;
+};
