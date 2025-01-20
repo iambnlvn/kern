@@ -141,7 +141,23 @@ pub const Driver = struct {
 // TODO!: Implement this
 const PartitionDevice = extern struct {
     sectorOffset: u64,
+    block: BlockDevice,
+    parent: *BlockDevice,
     const maxCount = 64;
+
+    fn register(self: *@This(), parent: *BlockDevice, offset: u64, sectorCount: u64, model: []const u8) void {
+        @memcpy(self.block.model[0..model.len], model);
+
+        self.parent = parent;
+        self.block.sectorSize = parent.sectorSize;
+        self.block.maxAccessSectorCount = parent.maxAccessSectorCount;
+        self.sectorOffset = offset;
+        self.block.sectorCount = sectorCount;
+        self.block.readOnly = parent.readOnly;
+        self.block.modelBytes = @as(u8, @intCast(model.len));
+        self.block.nestLevel = parent.nestLevel + 1;
+        self.block.driveType = parent.driveType;
+    }
 };
 
 pub const Drive = extern struct {
@@ -219,8 +235,10 @@ const BlockDevice = extern struct {
         if (MBR.getPartitions(self.signatureBlock, self.sectorCount)) {
             for (driver.mbrPartitions) |partition| {
                 if (partition.present) {
+                    const idx = driver.partitionDevices.len;
                     driver.partitionDevices.len += 1;
-                    //TODO!: partitions should be registered
+                    const partitionDev = &driver.partitionDevices[idx];
+                    partitionDev.register(self, partition.offset, partition.count, "MBR partition");
                     return true;
                 }
             }
