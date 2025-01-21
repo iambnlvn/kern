@@ -47,6 +47,20 @@ const DMABuffer = extern struct {
     }
 };
 
+fn PortRegister(comptime offset: u32) type {
+    return struct {
+        fn write(d: *Driver, port: u32, value: u32) void {
+            d.pci.writeBaseAddrReg32(5, offset + port * 0x80, value);
+        }
+
+        fn read(d: *Driver, port: u32) u32 {
+            return d.pci.readBaseAddrReg(5, offset + port * 0x80);
+        }
+    };
+}
+const PTFD = PortRegister(0x120);
+const PCIRegister = PortRegister(0x138);
+
 const MBR = extern struct {
     const Partition = extern struct {
         offset: u32,
@@ -96,6 +110,7 @@ pub const Driver = struct {
     partitionDevices: []PartitionDevice,
     capabilities: u32,
     cap2: u32,
+    pci: PCI.Device,
     commandSlotCount: u64,
     timeoutTimer: kernel.scheduling.Timer,
     isDm64Supported: bool,
@@ -136,7 +151,31 @@ pub const Driver = struct {
         driver.partitionDevices.len = 0;
         //TODO!: implement a setup
     }
+
+    pub fn sendSingleCmd(self: *@This(), port: u32) bool {
+        const timeout = kernel.Timeout.new(GENERAL_TIMEOUT);
+
+        while (PTFD.read(self, port) & ((1 << 7) | (1 << 3)) != 0 and !timeout.hit()) {}
+        if (timeout.hit()) return false;
+        @fence(.SeqCst);
+        PCIRegister.write(self, port, 1 << 0);
+        var isComplete = false;
+
+        while (!timeout.hit()) {
+            isComplete = ~PCIRegister.read(self, port) & (1 << 0) != 0;
+            if (isComplete) {
+                break;
+            }
+        }
+
+        return isComplete;
+    }
+
+    pub fn getDrive(self: *@This()) *Drive {
+        return &self.drives[0];
+    }
 };
+const GENERAL_TIMEOUT = 5000;
 
 // TODO!: Implement this
 const PartitionDevice = extern struct {

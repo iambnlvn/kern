@@ -347,3 +347,17 @@ pub const Errors = struct {
     pub const ES_ERROR_UNSUPPORTED_EXECUTABLE: Error = -62;
     pub const ES_ERROR_INSUFFICIENT_RESOURCES: Error = -52;
 };
+
+pub const Timeout = extern struct {
+    end: u64,
+
+    pub inline fn new(ms: u64) Timeout {
+        return Timeout{
+            .end = scheduler.timeMs + ms,
+        };
+    }
+
+    pub inline fn hit(self: @This()) bool {
+        return scheduler.timeMs >= self.end;
+    }
+};
