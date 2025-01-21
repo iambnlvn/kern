@@ -158,6 +158,14 @@ const PartitionDevice = extern struct {
         self.block.nestLevel = parent.nestLevel + 1;
         self.block.driveType = parent.driveType;
     }
+
+    fn access(req: BlockDevice.AccessRequest) kernel.Error {
+        var request = req;
+        const device = @as(*PartitionDevice, @ptrCast(request.device));
+        request.device = @as(*BlockDevice, @ptrCast(device.parent));
+        request.offset += device.sectorOffset * device.block.sectorSize;
+        return FSBlockDeviceAccess(request);
+    }
 };
 
 pub const Drive = extern struct {
@@ -199,7 +207,7 @@ const BlockDevice = extern struct {
         operation: i32,
         buffer: *DMABuffer,
         flags: Flags,
-        dispatch_group: ?*kernel.Workgroup,
+        dispatchGroup: ?*kernel.Workgroup,
 
         const Flags = kernel.ds.Bitflag(enum(u64) {
             cache = 0,
@@ -247,3 +255,65 @@ const BlockDevice = extern struct {
         return false;
     }
 };
+
+fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) kernel.Error {
+    var request = _request;
+    const device = request.device;
+
+    if (request.count == 0) return kernel.ES_SUCCESS;
+
+    if (device.readOnly and request.operation == BlockDevice.write) {
+        if (request.flags.contains(.softErrors)) return kernel.Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        kernel.panic("The device is read-only and the access requests for write permission");
+    }
+
+    if (request.offset / device.sectorSize > device.sectorCount or (request.offset + request.count) / device.sectorSize > device.sectorCount) {
+        if (request.flags.contains(.softErrors)) return kernel.Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        kernel.panic("Disk access out of bounds");
+    }
+
+    if (request.offset % device.sectorSize != 0 or request.count % device.sectorSize != 0) {
+        if (request.flags.contains(.softErrors)) return kernel.Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        kernel.panic("Unaligned access\n");
+    }
+
+    var buffer = request.buffer.*;
+
+    if (buffer.virtualAddr & 3 != 0) {
+        if (request.flags.contains(.softErrors)) return kernel.Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
+        kernel.panic("Buffer must be 4-byte aligned");
+    }
+
+    var fakeDispatchGroup = kernel.zeroes(kernel.Workgroup);
+    if (request.dispatchGroup == null) {
+        fakeDispatchGroup.init();
+        request.dispatchGroup = &fakeDispatchGroup;
+    }
+
+    var r = kernel.zeroes(BlockDevice.AccessRequest);
+    r.device = request.device;
+    r.buffer = &buffer;
+    r.flags = request.flags;
+    r.dispatchGroup = request.dispatchGroup;
+    r.operation = request.operation;
+    r.offset = request.offset;
+
+    while (request.count != 0) {
+        r.count = device.maxAccessSectorCount * device.sectorSize;
+        if (r.count > request.count) r.count = request.count;
+
+        buffer.offset = 0;
+        buffer.totalByteCount = r.count;
+        const callback = @as(BlockDevice.AccessRequest.Callback, @ptrFromInt(device.access));
+        _ = callback(r);
+        r.offset += r.count;
+        buffer.virtualAddr += r.count;
+        request.count -= r.count;
+    }
+
+    if (request.dispatchGroup == &fakeDispatchGroup) {
+        return if (fakeDispatchGroup.wait()) kernel.ES_SUCCESS else kernel.Errors.ES_ERROR_DRIVE_CONTROLLER_REPORTED;
+    } else {
+        return kernel.ES_SUCCESS;
+    }
+}

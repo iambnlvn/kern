@@ -26,11 +26,12 @@ pub export var ipiLock: sync.SpinLock = undefined;
 pub export var process: scheduling.Process = undefined;
 pub export var mmCoreRegionArrayCommit: u64 = 0;
 pub var rng: RandomNumberGenerator = undefined;
-
+pub const Error = i64;
 pub const ES_INVALID_HANDLE: u64 = 0x0;
 pub const ES_CURRENT_THREAD: u64 = 0x10;
 pub const ES_CURRENT_PROCESS: u64 = 0x11;
 pub const ES_SUCCESS: u64 = -1;
+
 pub fn Volatile(comptime T: type) type {
     return extern struct {
         value: T,
@@ -81,12 +82,12 @@ pub fn zeroes(comptime T: type) T {
     return zeroVal;
 }
 
-//Todo!: implement a way to write to the screen
-// This function is intended to be called when the kernel encounters an unrecoverable error.
-// pub fn kPanic(message: []const u8) noreturn {
-//     arch.disableInterrupts();
-//     arch.halt();
-// }
+//This function is intended to be called when the kernel encounters an unrecoverable error.
+pub fn kPanic(message: []const u8) noreturn {
+    _ = message;
+    arch.disableInterrupts();
+    arch.halt();
+}
 
 pub const CrashReason = extern struct {
     errorCode: FatalError,
@@ -338,4 +339,11 @@ pub const MessageQueue = extern struct {
 
 pub const MessageObject = extern struct {
     array: [5]u64,
+};
+
+pub const Errors = struct {
+    pub const ES_ERROR_BLOCK_ACCESS_INVALID: Error = -74;
+    pub const ES_ERROR_DRIVE_CONTROLLER_REPORTED: Error = -35;
+    pub const ES_ERROR_UNSUPPORTED_EXECUTABLE: Error = -62;
+    pub const ES_ERROR_INSUFFICIENT_RESOURCES: Error = -52;
 };
