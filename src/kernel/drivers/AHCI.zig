@@ -46,6 +46,17 @@ const DMABuffer = extern struct {
         };
     }
 };
+fn GlobalRegister(comptime offset: u32) type {
+    return struct {
+        fn write(d: *Driver, value: u32) void {
+            d.pci.writeBaseAddrReg32(5, offset, value);
+        }
+
+        fn read(d: *Driver) u32 {
+            return d.pci.readBaseAddrReg(5, offset);
+        }
+    };
+}
 
 fn PortRegister(comptime offset: u32) type {
     return struct {
@@ -60,7 +71,8 @@ fn PortRegister(comptime offset: u32) type {
 }
 const PTFD = PortRegister(0x120);
 const PCIRegister = PortRegister(0x138);
-
+const IS = GlobalRegister(8);
+const PIS = PortRegister(0x110);
 const MBR = extern struct {
     const Partition = extern struct {
         offset: u32,
@@ -123,6 +135,7 @@ pub const Driver = struct {
 
         cmdList: [*]u32,
         cmdTables: [*]u8,
+        cmdCTXs: [32]?*kernel.Workgroup,
         sectorByteCount: u64,
         sectorCount: u64,
 
@@ -169,6 +182,61 @@ pub const Driver = struct {
         }
 
         return isComplete;
+    }
+    pub fn handleIRQ(self: *@This()) bool {
+        const globalInterruptStatus = IS.read(self);
+        if (globalInterruptStatus == 0) return false;
+        IS.write(self, globalInterruptStatus);
+
+        const event = &recentInterruptEvents[recentInterruptEventsPtr.readVolatile()];
+        event.accessVolatile().timestamp = kernel.scheduler.timeMs;
+        event.accessVolatile().globalInterruptStatus = globalInterruptStatus;
+        event.accessVolatile().complete = false;
+        recentInterruptEventsPtr.writeVolatile((recentInterruptEventsPtr.readVolatile() + 1) % recentInterruptEvents.len);
+
+        var isCmdCompleted = false;
+
+        for (self.ports, 0..) |*port, portIdx| {
+            const portIndex = @as(u32, @intCast(portIdx));
+            if (~globalInterruptStatus & (@as(u32, 1) << @as(u5, @intCast(portIndex))) != 0) continue;
+
+            const interruptStatus = PIS.read(self, portIndex);
+            if (interruptStatus == 0) continue;
+
+            PIS.write(self, portIndex, interruptStatus);
+
+            if (interruptStatus & ((1 << 30 | (1 << 29) | (1 << 28) | (1 << 27) | (1 << 26) | (1 << 24) | (1 << 23))) != 0) {}
+            port.cmdSpinlock.acquire();
+            const issuedCmd = PCIRegister.read(self, portIndex);
+
+            if (portIndex == 0) {
+                event.accessVolatile().port0IssuedCmds = issuedCmd;
+                event.accessVolatile().port0RunningCmds = port.runningCmds;
+            }
+
+            var i: u32 = 0;
+            while (i < self.ports.len) : (i += 1) {
+                const shifter = (@as(u32, 1) << @as(u5, @intCast(i)));
+                if (~port.runningCmds & shifter != 0) continue;
+                if (issuedCmd & shifter != 0) continue;
+
+                port.cmdCTXs[i].?.end(true);
+                port.cmdCTXs[i] = null;
+                _ = port.cmdSlotsAvailableEvent.set(true);
+                port.runningCmds &= ~shifter;
+
+                isCmdCompleted = true;
+            }
+
+            port.cmdSpinlock.release();
+        }
+
+        if (isCmdCompleted) {
+            arch.getLocalStorage().?.IRQSwitchCtx = true;
+        }
+
+        event.accessVolatile().complete = true;
+        return true;
     }
 
     pub fn getDrive(self: *@This()) *Drive {
@@ -356,3 +424,13 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) kernel.Error {
         return kernel.ES_SUCCESS;
     }
 }
+
+export var recentInterruptEvents: [64]kernel.Volatile(InterruptEvent) = undefined;
+export var recentInterruptEventsPtr: kernel.Volatile(u64) = undefined;
+const InterruptEvent = extern struct {
+    timestamp: u64,
+    globalInterruptStatus: u32,
+    port0RunningCmds: u32,
+    port0IssuedCmds: u32,
+    isComplete: bool,
+};
