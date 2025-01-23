@@ -12,6 +12,7 @@ pub const object = @import("obj.zig");
 pub const drivers = @import("drivers.zig");
 const RandomNumberGenerator = @import("kernelUtils.zig").RandomNumberGenerator;
 pub const syscall = @import("syscall.zig");
+pub const FileSytem = @import("fileSystem.zig");
 const Heap = memory.Heap;
 pub export var scheduler: Scheduler = undefined;
 pub export var coreAddressSpace: memory.AddressSpace = undefined;
