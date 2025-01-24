@@ -4,10 +4,13 @@ const PCI = kernel.drivers.PCI;
 const Mutex = kernel.sync.Mutex;
 const arch = @import("../arch/x86_64.zig");
 const kUtils = @import("../kernelUtils.zig");
-
+const COMMAND_LIST_SIZE = 0x400;
+const RECEIVED_FIS_SIZE = 0x100;
 const PRDT_ENTRY_COUNT = 0x48;
 const CMD_TABLE_SIZE = 0x80 + PRDT_ENTRY_COUNT * 0x10;
-
+const classCode = 1;
+const subClassCode = 6;
+const progIF = 1;
 const DMASegment = extern struct {
     physicalAddr: u64,
     byteCount: u64,
@@ -76,6 +79,23 @@ const PTFD = PortRegister(0x120);
 const PCIRegister = PortRegister(0x138);
 const IS = GlobalRegister(8);
 const PIS = PortRegister(0x110);
+const CAP = GlobalRegister(0);
+const CAP2 = GlobalRegister(0x24);
+const BOHC = GlobalRegister(0x28);
+const GHC = GlobalRegister(4);
+const PI = GlobalRegister(0xc);
+
+const PIE = PortRegister(0x114);
+const PCMD = PortRegister(0x118);
+const PSIG = PortRegister(0x124);
+const PSSTS = PortRegister(0x128);
+const PSCTL = PortRegister(0x12c);
+const PSERR = PortRegister(0x130);
+const PCLB = PortRegister(0x100);
+const PCLBU = PortRegister(0x104);
+const PFB = PortRegister(0x108);
+const PFBU = PortRegister(0x10c);
+
 const MBR = extern struct {
     const Partition = extern struct {
         offset: u32,
@@ -160,12 +180,12 @@ pub const Driver = struct {
         const address = kernel.addrSpace.alloc(allocSize, kernel.memory.Region.Flags.fromFlag(.fixed), arch.modulePtr, true);
         if (address == 0) kernel.panic("Could not allocate memory for PCI driver");
         arch.modulePtr += kUtils.roundUp(u64, allocSize, arch.pageSize);
-        driver = @as(*Driver, @ptrFromInt(address));
-        driver.drives.ptr = @as([*]Drive, @ptrFromInt(address + driveOffset));
+        driver = @as(*Driver, @intFromPtr(address));
+        driver.drives.ptr = @as([*]Drive, @intFromPtr(address + driveOffset));
         driver.drives.len = 0;
-        driver.partitionDevices.ptr = @as([*]PartitionDevice, @ptrFromInt(address + partitionDevicesOffset));
+        driver.partitionDevices.ptr = @as([*]PartitionDevice, @intFromPtr(address + partitionDevicesOffset));
         driver.partitionDevices.len = 0;
-        //TODO!: implement a setup
+        driver.setup();
     }
 
     pub fn sendSingleCmd(self: *@This(), port: u32) bool {
@@ -241,6 +261,307 @@ pub const Driver = struct {
         event.accessVolatile().complete = true;
         return true;
     }
+    //TODO: improve this
+    pub fn setup(self: *@This()) void {
+        self.pci = &PCI.driver.devices[3];
+
+        const is_AHCPI_Device = self.pci.classCode == classCode and self.pci.subClassCode == subClassCode and self.pci.progIF == progIF;
+
+        if (!is_AHCPI_Device) kernel.panic("AHCI PCI device not found");
+
+        _ = self.pci.enableFeatures(PCI.Features.fromFlags(.{ .interrupts, .busMasterDMA, .memorySpaceAccess, .bar5 }));
+
+        if (CAP2.read(self) & (1 << 0) != 0) {
+            BOHC.write(self, BOHC.read(self) | (1 << 1));
+            const timeout = kernel.Timeout.new(25);
+            var status: u32 = undefined;
+
+            while (true) {
+                status = BOHC.read(self);
+                if (status & (1 << 0) != 0) break;
+                if (timeout.hit()) break;
+            }
+
+            if (status & (1 << 0) != 0) {
+                var event = kernel.zeroes(kernel.sync.Event);
+                _ = event.waitTimeout(2000);
+            }
+        }
+
+        {
+            const timeout = kernel.Timeout.new(GENERAL_TIMEOUT);
+            GHC.write(self, GHC.read(self) | (1 << 0));
+            while (GHC.read(self) & (1 << 0) != 0 and !timeout.hit()) {}
+
+            if (timeout.hit()) kernel.panic("AHCI timeout hit");
+        }
+        if (!self.pci.enableSingleInterrupt(handler, @intFromPtr(self), "AHCI")) kernel.panic("Unable to initialize AHCI");
+
+        GHC.write(self, GHC.read(self) | (1 << 31) | (1 << 1));
+        self.capabilities = CAP.read(self);
+        self.cap2 = CAP2.read(self);
+        self.commandSlotCount = ((self.capabilities >> 8) & 31) + 1;
+        self.isDm64Supported = self.capabilities & (1 << 31) != 0;
+        if (!self.isDm64Supported) kernel.panic("DMA is not supported");
+
+        const maxPortNumber = (self.capabilities & 31) + 1;
+        var isPortCountFound: u64 = 0;
+        const implementedPorts = PI.read(self);
+
+        for (self.ports, 0..) |*port, i| {
+            if (implementedPorts & (@as(u32, 1) << @as(u5, @intCast(i))) != 0) {
+                isPortCountFound += 1;
+                if (isPortCountFound <= maxPortNumber) port.connected = true;
+            }
+        }
+
+        for (self.ports, 0..) |*port, _port_i| {
+            if (port.connected) {
+                const port_i = @as(u32, @intCast(_port_i));
+                const neededByteCount = COMMAND_LIST_SIZE + RECEIVED_FIS_SIZE + CMD_TABLE_SIZE * self.commandSlotCount;
+
+                var virtualAddr: u64 = 0;
+                var physicalAddr: u64 = 0;
+
+                if (!kernel.memory.physicalAllocFlagged(neededByteCount, arch.pageSize, if (self.isDm64Supported) 64 else 32, true, kernel.memory.Region.Flags.fromFlag(.notCacheable), &virtualAddr, &physicalAddr)) {
+                    kernel.panic("AHCI allocation failure");
+                }
+
+                port.cmdList = @as([*]u32, @intFromPtr(virtualAddr));
+                port.cmdTables = @as([*]u8, @intFromPtr(virtualAddr + COMMAND_LIST_SIZE + RECEIVED_FIS_SIZE));
+
+                PCLB.write(self, port_i, @as(u32, @truncate(physicalAddr)));
+                PFB.write(self, port_i, @as(u32, @truncate(physicalAddr + 0x400)));
+                if (self.isDm64Supported) {
+                    PCLBU.write(self, port_i, @as(u32, @truncate(physicalAddr >> 32)));
+                    PFBU.write(self, port_i, @as(u32, @truncate((physicalAddr + 0x400) >> 32)));
+                }
+
+                var cmdSlot: u64 = 0;
+                while (cmdSlot < self.commandSlotCount) : (cmdSlot += 1) {
+                    const address = physicalAddr + COMMAND_LIST_SIZE + RECEIVED_FIS_SIZE + COMMAND_LIST_SIZE * cmdSlot;
+                    port.cmdList[cmdSlot * 8 + 2] = @as(u32, @truncate(address));
+                    port.cmdList[cmdSlot * 8 + 3] = @as(u32, @truncate(address >> 32));
+                }
+
+                const timeout = kernel.Timeout.new(GENERAL_TIMEOUT);
+                const runningBits = (1 << 0) | (1 << 4) | (1 << 15) | (1 << 14);
+
+                while (true) {
+                    const status = PCMD.read(self, port_i);
+                    if (status & runningBits == 0 or timeout.hit()) break;
+                    PCMD.write(self, port_i, status & ~@as(u32, (1 << 0) | (1 << 4)));
+                }
+
+                const resetPortTimeout = PCMD.read(self, port_i) & runningBits != 0;
+                if (resetPortTimeout) {
+                    port.connected = false;
+                    continue;
+                }
+
+                PIE.write(self, port_i, PIE.read(self, port_i) & 0x0e3fff0);
+                PIS.write(self, port_i, PIS.read(self, port_i));
+
+                PSCTL.write(self, port_i, PSCTL.read(self, port_i) | (3 << 8));
+                PCMD.write(self, port_i, (PCMD.read(self, port_i) & 0x0FFFFFFF) |
+                    (1 << 1) |
+                    (1 << 2) |
+                    (1 << 4) |
+                    (1 << 28));
+
+                var linkTimeout = kernel.Timeout.new(10);
+
+                while (PSSTS.read(self, port_i) & 0xf != 3 and !linkTimeout.hit()) {}
+                const activatePortTimeout = PSSTS.read(self, port_i) & 0xf != 3;
+                if (activatePortTimeout) {
+                    port.connected = false;
+                    continue;
+                }
+
+                PSERR.write(self, port_i, PSERR.read(self, port_i));
+
+                while (PTFD.read(self, port_i) & 0x88 != 0 and !timeout.hit()) {}
+                const portReadyTimeout = PTFD.read(self, port_i) & 0x88 != 0;
+                if (portReadyTimeout) {
+                    port.connected = false;
+                    continue;
+                }
+
+                PCMD.write(self, port_i, PCMD.read(self, port_i) | (1 << 0));
+                PIE.write(self, port_i, PIE.read(self, port_i) |
+                    (1 << 5) |
+                    (1 << 0) |
+                    (1 << 30) |
+                    (1 << 29) |
+                    (1 << 28) |
+                    (1 << 27) |
+                    (1 << 26) |
+                    (1 << 24) |
+                    (1 << 23));
+            }
+        }
+
+        for (self.ports, 0..) |*port, _port_i| {
+            if (port.connected) {
+                const port_i = @as(u32, @intCast(_port_i));
+
+                const status = PSSTS.read(self, port_i);
+
+                if (status & 0xf != 0x3 or status & 0xf0 == 0 or status & 0xf00 != 0x100) {
+                    port.connected = false;
+                    continue;
+                }
+
+                const signature = PSIG.read(self, port_i);
+
+                if (signature == 0x00000101) {
+                    // handle SATA drive
+                } else if (signature == 0xEB140101) {
+                    // SATAPI drive
+                    port.atapi = true;
+                } else if (signature == 0) {
+                    // no drive connected
+                    port.connected = false;
+                } else {
+                    // unrecognized drive signature
+                    port.connected = false;
+                }
+            }
+        }
+
+        var identifyData: u64 = 0;
+        var identifyDataPhysical: u64 = 0;
+
+        if (!kernel.memory.physicalAllocFlagged(0x200, arch.pageSize, if (self.isDm64Supported) 64 else 32, true, kernel.memory.Region.Flags.fromFlag(.notCacheable), &identifyData, &identifyDataPhysical)) {
+            kernel.panic("Allocation failure");
+        }
+
+        for (self.ports, 0..) |*port, _port_i| {
+            if (port.connected) {
+                const port_i = @as(u32, @intCast(_port_i));
+                kernel.EsMemoryZero(identifyData, 0x200);
+
+                port.cmdList[0] = 5 | (1 << 16);
+                port.cmdList[1] = 0;
+
+                const opcode: u32 = if (port.atapi) 0xa1 else 0xec;
+                const cmdFIS = @as([*]u32, @ptrCast(@alignCast(port.cmdTables)));
+                cmdFIS[0] = 0x27 | (1 << 15) | (opcode << 16);
+                cmdFIS[1] = 0;
+                cmdFIS[2] = 0;
+                cmdFIS[3] = 0;
+                cmdFIS[4] = 0;
+
+                const prdt = @as([*]u32, @intFromPtr(@intFromPtr(port.cmdTables) + 0x80));
+                prdt[0] = @as(u32, @truncate(identifyDataPhysical));
+                prdt[1] = @as(u32, @truncate(identifyDataPhysical >> 32));
+                prdt[2] = 0;
+                prdt[3] = 0x200 - 1;
+
+                if (!self.sendSingleCmd(port_i)) {
+                    PCMD.write(self, port_i, PCMD.read(self, port_i) & ~@as(u32, 1 << 0));
+                    port.connected = false;
+                    continue;
+                }
+
+                port.sectorByteCount = 0x200;
+
+                const identifyPtr = @as([*]u16, @intFromPtr(identifyData));
+                if (identifyPtr[106] & (1 << 14) != 0 and ~identifyPtr[106] & (1 << 15) != 0 and identifyPtr[106] & (1 << 12) != 0) {
+                    port.sectorByteCount = identifyPtr[117] | (@as(u32, @intCast(identifyPtr[118])) << 16);
+                }
+
+                port.sectorCount = identifyPtr[100] + (@as(u64, @intCast(identifyPtr[101])) << 16) + (@as(u64, @intCast(identifyPtr[102])) << 32) + (@as(u64, @intCast(identifyPtr[103])) << 48);
+
+                if (!(identifyPtr[49] & (1 << 9) != 0 and identifyPtr[49] & (1 << 8) != 0)) {
+                    port.connected = false;
+                    continue;
+                }
+
+                if (port.atapi) {
+                    port.cmdList[0] = 5 | (1 << 16) | (1 << 5);
+                    cmdFIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+                    cmdFIS[1] = 8 << 8;
+                    prdt[3] = 8 - 1;
+
+                    const scsiCMD = @as([*]u8, @ptrCast(cmdFIS));
+                    kernel.EsMemoryZero(@intFromPtr(scsiCMD), 10);
+                    scsiCMD[0] = 0x25;
+
+                    if (!self.sendSingleCmd(port_i)) {
+                        PCMD.write(self, port_i, PCMD.read(self, port_i) & ~@as(u32, 1 << 0));
+                        port.connected = false;
+                        continue;
+                    }
+
+                    const capacity = @as([*]u8, @intFromPtr(identifyData));
+                    port.sectorCount = capacity[3] + (@as(u64, @intCast(capacity[2])) << 8) + (@as(u64, @intCast(capacity[1])) << 16) + (@as(u64, @intCast(capacity[0])) << 24) + 1;
+                    port.sectorByteCount = capacity[7] + (@as(u64, @intCast(capacity[6])) << 8) + (@as(u64, @intCast(capacity[5])) << 16) + (@as(u64, @intCast(capacity[4])) << 24);
+                }
+
+                if (port.sectorCount <= 128 or port.sectorByteCount & 0x1ff != 0 or port.sectorByteCount == 0 or port.sectorByteCount > 0x1000) {
+                    port.connected = false;
+                    continue;
+                }
+
+                var model: u64 = 0;
+                while (model < 20) : (model += 1) {
+                    port.model[model * 2 + 0] = @as(u8, @truncate(identifyPtr[27 + model] >> 8));
+                    port.model[model * 2 + 1] = @as(u8, @truncate(identifyPtr[27 + model]));
+                }
+
+                port.model[40] = 0;
+
+                model = 39;
+
+                while (model > 0) : (model -= 1) {
+                    if (port.model[model] == ' ') port.model[model] = 0 else break;
+                }
+
+                port.ssd = identifyPtr[217] == 1;
+
+                var i: u64 = 10;
+                while (i < 20) : (i += 1) {
+                    identifyPtr[i] = (identifyPtr[i] >> 8) | (identifyPtr[i] << 8);
+                }
+
+                i = 23;
+                while (i < 27) : (i += 1) {
+                    identifyPtr[i] = (identifyPtr[i] >> 8) | (identifyPtr[i] << 8);
+                }
+
+                i = 27;
+                while (i < 47) : (i += 1) {
+                    identifyPtr[i] = (identifyPtr[i] >> 8) | (identifyPtr[i] << 8);
+                }
+            }
+        }
+
+        _ = kernel.addrSpace.free(identifyData, 0, false);
+        kernel.memory.physicalFree(identifyDataPhysical, false, 1);
+
+        self.timeoutTimer.setEx(GENERAL_TIMEOUT, TimeoutTimerHit, @intFromPtr(self));
+
+        for (self.ports, 0..) |*port, _port_i| {
+            if (port.connected) {
+                const port_i = @as(u32, @intCast(_port_i));
+                const driveIndex = self.drives.len;
+                self.drives.len += 1;
+                const drive = &self.drives[driveIndex];
+                drive.port = port_i;
+                drive.blockDevice.sectorSize = port.sectorByteCount;
+                drive.blockDevice.sectorCount = port.sectorCount;
+                drive.blockDevice.maxAccessSectorCount = if (port.atapi) (65535 / drive.blockDevice.sectorSize) else (PRDT_ENTRY_COUNT - 1) * arch.pageSize / drive.blockDevice.sectorSize;
+                drive.blockDevice.readOnly = port.atapi;
+                @memcpy(drive.blockDevice.model[0..port.model.len], port.model[0..]);
+                drive.blockDevice.modelBytes = port.model.len;
+                drive.blockDevice.driveType = if (port.atapi) DriveType.cdrom else if (port.ssd) DriveType.ssd else DriveType.hdd;
+
+                drive.blockDevice.access = @intFromPtr(accessCallback);
+                //TODO: do some fs registering
+            }
+        }
+    }
 
     pub fn getDrive(self: *@This()) *Drive {
         return &self.drives[0];
@@ -292,18 +613,18 @@ pub const Driver = struct {
             }
         }
 
-        const sectorCount = byteCount / port.sector_byte_count;
-        const offsetSectors = offset / port.sector_byte_count;
+        const sectorCount = byteCount / port.sectorByteCount;
+        const offsetSectors = offset / port.sectorByteCount;
 
-        const command_FIS = @as([*]u32, @ptrFromInt(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx));
-        command_FIS[0] = 0x27 | (1 << 15) | (@as(u32, if (op == BlockDevice.write) 0x35 else 0x25) << 16);
-        command_FIS[1] = (@as(u32, @intCast(offsetSectors)) & 0xffffff) | (1 << 30);
-        command_FIS[2] = @as(u32, @intCast(offsetSectors >> 24)) & 0xffffff;
-        command_FIS[3] = @as(u16, @truncate(sectorCount));
-        command_FIS[4] = 0;
+        const cmdFIS = @as([*]u32, @intFromPtr(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx));
+        cmdFIS[0] = 0x27 | (1 << 15) | (@as(u32, if (op == BlockDevice.write) 0x35 else 0x25) << 16);
+        cmdFIS[1] = (@as(u32, @intCast(offsetSectors)) & 0xffffff) | (1 << 30);
+        cmdFIS[2] = @as(u32, @intCast(offsetSectors >> 24)) & 0xffffff;
+        cmdFIS[3] = @as(u16, @truncate(sectorCount));
+        cmdFIS[4] = 0;
 
         var m_PRDT_entry_count: u64 = 0;
-        const prdt = @as([*]u32, @ptrFromInt(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx + 0x80));
+        const prdt = @as([*]u32, @intFromPtr(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx + 0x80));
 
         while (!buffer.isComplete()) {
             if (m_PRDT_entry_count == PRDT_ENTRY_COUNT) kernel.panic("Too many PRDT entries");
@@ -322,17 +643,17 @@ pub const Driver = struct {
 
         if (port.atapi) {
             port.cmdList[cmdIdx * 8 + 0] |= (1 << 5);
-            command_FIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
-            command_FIS[1] = @as(u32, @intCast(byteCount)) << 8;
+            cmdFIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+            cmdFIS[1] = @as(u32, @intCast(byteCount)) << 8;
 
-            const scsi_command = @as([*]u8, @ptrFromInt(@intFromPtr(command_FIS) + 0x40));
-            std.mem.set(u8, scsi_command[0..10], 0);
-            scsi_command[0] = 0xa8;
-            scsi_command[2] = @as(u8, @truncate(offsetSectors >> 0x18));
-            scsi_command[3] = @as(u8, @truncate(offsetSectors >> 0x10));
-            scsi_command[4] = @as(u8, @truncate(offsetSectors >> 0x08));
-            scsi_command[5] = @as(u8, @truncate(offsetSectors >> 0x00));
-            scsi_command[9] = @intCast(sectorCount);
+            const scsiCMD = @as([*]u8, @intFromPtr(@intFromPtr(cmdFIS) + 0x40));
+            std.mem.set(u8, scsiCMD[0..10], 0);
+            scsiCMD[0] = 0xa8;
+            scsiCMD[2] = @as(u8, @truncate(offsetSectors >> 0x18));
+            scsiCMD[3] = @as(u8, @truncate(offsetSectors >> 0x10));
+            scsiCMD[4] = @as(u8, @truncate(offsetSectors >> 0x08));
+            scsiCMD[5] = @as(u8, @truncate(offsetSectors >> 0x00));
+            scsiCMD[9] = @intCast(sectorCount);
         }
 
         port.cmdSpinlock.acquire();
@@ -434,7 +755,7 @@ const BlockDevice = extern struct {
         if (sectorsToRead > self.sectorCount) kernel.panic("Drive too small");
 
         const bytesToRead = sectorsToRead * self.sectorSize;
-        self.signatureBlock = @as(?[*]u8, @ptrFromInt(kernel.heapFixed.alloc(bytesToRead, false))) orelse kernel.panic("unable to allocate memory for fs detection");
+        self.signatureBlock = @as(?[*]u8, @intFromPtr(kernel.heapFixed.alloc(bytesToRead, false))) orelse kernel.panic("unable to allocate memory for fs detection");
         var dmaBuffer = kernel.zeroes(DMABuffer);
         dmaBuffer.virtualAddr = @intFromPtr(self.signatureBlock);
         var request = kernel.zeroes(BlockDevice.AccessRequest);
@@ -513,7 +834,7 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) kernel.Error {
 
         buffer.offset = 0;
         buffer.totalByteCount = r.count;
-        const callback = @as(BlockDevice.AccessRequest.Callback, @ptrFromInt(device.access));
+        const callback = @as(BlockDevice.AccessRequest.Callback, @intFromPtr(device.access));
         _ = callback(r);
         r.offset += r.count;
         buffer.virtualAddr += r.count;
@@ -536,3 +857,30 @@ const InterruptEvent = extern struct {
     port0IssuedCmds: u32,
     isComplete: bool,
 };
+
+fn TimeoutTimerHit(task: *kernel.scheduling.AsyncTask) void {
+    const _driver = @as(Driver, @fieldParentPtr("timeoutTimer", @as(kernel.scheduling.Timer, @fieldParentPtr("asyncTask", task))));
+    const currentTimestamp = kernel.scheduler.timeMs;
+
+    for (_driver.ports) |*port| {
+        port.cmdSpinlock.acquire();
+
+        var slot: u64 = 0;
+        while (slot < _driver.commandSlotCount) : (slot += 1) {
+            const slotMask = @as(u32, @intCast(1)) << @as(u5, @intCast(slot));
+            if (port.runningCmds & slotMask != 0 and port.cmdStartTimestamps[slot] + GENERAL_TIMEOUT < currentTimestamp) {
+                port.cmdCTXs[slot].?.end(false);
+                port.cmdCTXs[slot] = null;
+                port.runningCmds &= ~slotMask;
+            }
+        }
+
+        port.cmdSpinlock.release();
+    }
+
+    _driver.timeoutTimer.setEx(GENERAL_TIMEOUT, TimeoutTimerHit, @intFromPtr(_driver));
+}
+fn handler(_: u64, context: u64) callconv(.C) bool {
+    const tmp = @as(*Driver, @intFromPtr(context));
+    return tmp.handleIRQ();
+}
