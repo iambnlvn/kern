@@ -5,6 +5,9 @@ const Mutex = kernel.sync.Mutex;
 const arch = @import("../arch/x86_64.zig");
 const kUtils = @import("../kernelUtils.zig");
 
+const PRDT_ENTRY_COUNT = 0x48;
+const CMD_TABLE_SIZE = 0x80 + PRDT_ENTRY_COUNT * 0x10;
+
 const DMASegment = extern struct {
     physicalAddr: u64,
     byteCount: u64,
@@ -242,6 +245,105 @@ pub const Driver = struct {
     pub fn getDrive(self: *@This()) *Drive {
         return &self.drives[0];
     }
+    pub fn accessCallback(request: BlockDevice.AccessRequest) kernel.Error {
+        const drive = @as(*Drive, @ptrCast(request.device));
+        request.dispatchGroup.?.start();
+
+        if (!driver.access(drive.port, request.offset, request.count, request.op, request.buffer, request.flags, request.dispatchGroup)) {
+            request.dispatchGroup.?.end(false);
+        }
+
+        return kernel.ES_SUCCESS;
+    }
+    pub fn access(self: *@This(), _portIdx: u64, offset: u64, byteCount: u64, op: i32, buffer: *DMABuffer, flags: BlockDevice.AccessRequest.Flags, dispatchGroup: ?*kernel.Workgroup) bool {
+        _ = flags;
+        const portIndex = @as(u32, @intCast(_portIdx));
+        const port = &self.ports[portIndex];
+
+        var cmdIdx: u64 = 0;
+
+        while (true) {
+            port.cmdSpinlock.acquire();
+
+            const availableCmd = ~PCIRegister.read(self, portIndex);
+
+            var isFound = false;
+            var slot: u64 = 0;
+            while (slot < self.commandSlotCount) : (slot += 1) {
+                if (availableCmd & (@as(u32, 1) << @as(u5, @intCast(slot))) != 0 and port.cmdCTXs[slot] == null) {
+                    cmdIdx = slot;
+                    isFound = true;
+                    break;
+                }
+            }
+
+            if (!isFound) {
+                port.cmdSlotsAvailableEvent.reset();
+            } else {
+                port.cmdCTXs[cmdIdx] = dispatchGroup;
+            }
+
+            port.cmdSpinlock.release();
+
+            if (!isFound) {
+                _ = port.cmdSlotsAvailableEvent.wait();
+            } else {
+                break;
+            }
+        }
+
+        const sectorCount = byteCount / port.sector_byte_count;
+        const offsetSectors = offset / port.sector_byte_count;
+
+        const command_FIS = @as([*]u32, @ptrFromInt(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx));
+        command_FIS[0] = 0x27 | (1 << 15) | (@as(u32, if (op == BlockDevice.write) 0x35 else 0x25) << 16);
+        command_FIS[1] = (@as(u32, @intCast(offsetSectors)) & 0xffffff) | (1 << 30);
+        command_FIS[2] = @as(u32, @intCast(offsetSectors >> 24)) & 0xffffff;
+        command_FIS[3] = @as(u16, @truncate(sectorCount));
+        command_FIS[4] = 0;
+
+        var m_PRDT_entry_count: u64 = 0;
+        const prdt = @as([*]u32, @ptrFromInt(@intFromPtr(port.cmdTables) + CMD_TABLE_SIZE * cmdIdx + 0x80));
+
+        while (!buffer.isComplete()) {
+            if (m_PRDT_entry_count == PRDT_ENTRY_COUNT) kernel.panic("Too many PRDT entries");
+
+            const segment = buffer.nextSegment(false);
+
+            prdt[0 + 4 * m_PRDT_entry_count] = @as(u32, @truncate(segment.physicalAddr));
+            prdt[1 + 4 * m_PRDT_entry_count] = @as(u32, @truncate(segment.physicalAddr >> 32));
+            prdt[2 + 4 * m_PRDT_entry_count] = 0;
+            prdt[3 + 4 * m_PRDT_entry_count] = (@as(u32, @intCast(segment.byteCount)) - 1) | @as(u32, if (segment.isLast) (1 << 31) else 0);
+            m_PRDT_entry_count += 1;
+        }
+
+        port.cmdList[cmdIdx * 8 + 0] = 5 | (@as(u32, @intCast(m_PRDT_entry_count)) << 16) | @as(u32, if (op == BlockDevice.write) (1 << 6) else 0);
+        port.cmdList[cmdIdx * 8 + 1] = 0;
+
+        if (port.atapi) {
+            port.cmdList[cmdIdx * 8 + 0] |= (1 << 5);
+            command_FIS[0] = 0x27 | (1 << 15) | (0xa0 << 16);
+            command_FIS[1] = @as(u32, @intCast(byteCount)) << 8;
+
+            const scsi_command = @as([*]u8, @ptrFromInt(@intFromPtr(command_FIS) + 0x40));
+            std.mem.set(u8, scsi_command[0..10], 0);
+            scsi_command[0] = 0xa8;
+            scsi_command[2] = @as(u8, @truncate(offsetSectors >> 0x18));
+            scsi_command[3] = @as(u8, @truncate(offsetSectors >> 0x10));
+            scsi_command[4] = @as(u8, @truncate(offsetSectors >> 0x08));
+            scsi_command[5] = @as(u8, @truncate(offsetSectors >> 0x00));
+            scsi_command[9] = @intCast(sectorCount);
+        }
+
+        port.cmdSpinlock.acquire();
+        port.runningCmds |= @as(u32, @intCast(1)) << @as(u5, @intCast(cmdIdx));
+        @fence(.SeqCst);
+        PCIRegister.write(self, portIndex, @as(u32, @intCast(1)) << @as(u5, @intCast(cmdIdx)));
+        port.cmdStartTimestamps[cmdIdx] = kernel.scheduler.timeMs;
+        port.cmdSpinlock.release();
+
+        return true;
+    }
 };
 const GENERAL_TIMEOUT = 5000;
 
@@ -311,7 +413,7 @@ const BlockDevice = extern struct {
         device: *BlockDevice,
         offset: u64,
         count: u64,
-        operation: i32,
+        op: i32,
         buffer: *DMABuffer,
         flags: Flags,
         dispatchGroup: ?*kernel.Workgroup,
@@ -338,7 +440,7 @@ const BlockDevice = extern struct {
         var request = kernel.zeroes(BlockDevice.AccessRequest);
         request.device = self;
         request.count = bytesToRead;
-        request.operation = read;
+        request.op = read;
         request.buffer = &dmaBuffer;
         //TODO?: should have access
 
@@ -369,7 +471,7 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) kernel.Error {
 
     if (request.count == 0) return kernel.ES_SUCCESS;
 
-    if (device.readOnly and request.operation == BlockDevice.write) {
+    if (device.readOnly and request.op == BlockDevice.write) {
         if (request.flags.contains(.softErrors)) return kernel.Errors.ES_ERROR_BLOCK_ACCESS_INVALID;
         kernel.panic("The device is read-only and the access requests for write permission");
     }
@@ -402,7 +504,7 @@ fn FSBlockDeviceAccess(_request: BlockDevice.AccessRequest) kernel.Error {
     r.buffer = &buffer;
     r.flags = request.flags;
     r.dispatchGroup = request.dispatchGroup;
-    r.operation = request.operation;
+    r.op = request.op;
     r.offset = request.offset;
 
     while (request.count != 0) {
