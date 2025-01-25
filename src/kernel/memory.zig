@@ -130,12 +130,11 @@ pub const AddressSpace = extern struct {
             const node = self.usedRegions.find(addr, .LargestBelowOrEqual) orelse return null;
 
             const region = node.value.?;
-            if (region.descriptor.baseAddr > addr) std.debug.panic("Unvalid regions tree", .{});
+            if (region.descriptor.baseAddr > addr) kernel.panic("Unvalid regions tree");
             if (region.descriptor.baseAddr + region.descriptor.pageCount * pageSize <= addr) return null;
             return region;
         }
     }
-    //TODO: implement the rest of the functions
     pub fn init(space: *Self) callconv(.C) bool {
         space.isUser = true;
     }
@@ -154,14 +153,14 @@ pub const AddressSpace = extern struct {
 
     pub fn openRef(space: *AddressSpace) callconv(.C) void {
         if (space != &kernel.addrSpace) {
-            if (space.refCount.readVolatile() < 1) std.debug.panic("space has invalid reference count", .{});
+            if (space.refCount.readVolatile() < 1) kernel.panic("space has invalid reference count");
             _ = space.refCount.atomicFetchAdd(1);
         }
     }
 
     pub fn closeRef(space: *AddressSpace) callconv(.C) void {
         if (space == &kernel.addrSpace) return;
-        if (space.refCount.readVolatile() < 1) std.debug.panic("space has invalid reference count", .{});
+        if (space.refCount.readVolatile() < 1) kernel.panic("space has invalid reference count");
         if (space.refCount.atomicFetchSub(1) > 1) return;
 
         space.removeAsyncTask.register(CloseReferenceTask);
@@ -182,19 +181,18 @@ pub const AddressSpace = extern struct {
 
         if (region.flags.contains(.normal)) {
             if (!space.decommitRange(region, 0, region.descriptor.pageCount)) {
-                std.debug.panic("Failed to decommit range", .{});
+                kernel.panic("Failed to decommit range");
             }
             if (region.data.u.normal.commitPageCount != 0) {
-                std.debug.panic("Failed to decommit range", .{});
+                kernel.panic("Failed to decommit range");
             }
             region.data.u.normal.commit.ranges.free();
             unmapPages = false;
         } else if (region.flags.contains(.shared)) {
-            //Todo: implement handle closing for objects
-
+            kernel.object.closeHandle(region.data.u.shared.region, 0);
         } else if (region.flags.contains(.file) or region.flags.contains(.physical)) {
-            std.debug.panic("Not implemented", .{});
-        } else if (region.flags.contains(.guard)) return false else std.debug.panic("unsupported region type", .{});
+            kernel.panic("Not implemented");
+        } else if (region.flags.contains(.guard)) return false else kernel.panic("unsupported region type");
         return true;
     }
 
@@ -254,7 +252,7 @@ pub const AddressSpace = extern struct {
             return true;
         } else if (region.flags.contains(.shared)) {
             const sharedRegion = region.data.u.shared.region.?;
-            if (sharedRegion.handleCount.readVolatile() == 0) std.debug.panic("Shared region has no handles", .{});
+            if (sharedRegion.handleCount.readVolatile() == 0) kernel.panic("Shared region has no handles");
             _ = sharedRegion.mutex.acquire();
 
             const offset = address - region.descriptor.baseAddr + region.data.u.shared.offset;
@@ -289,18 +287,18 @@ pub const AddressSpace = extern struct {
     pub fn decommitRange(space: *AddressSpace, region: *Region, pageOffset: u64, pageCount: u64) callconv(.C) bool {
         space.reserveMutex.assertLocked();
 
-        if (region.flags.contains(.notCOmmitTracking)) std.debug.panic("Region does not support commit tracking", .{});
-        if (pageOffset >= region.descriptor.pageCount or pageCount > region.descriptor.pageCount - pageOffset) std.debug.panic("invalid region offset and page count", .{});
-        if (!region.flags.contains(.normal)) std.debug.panic("Cannot decommit from non-normal region", .{});
+        if (region.flags.contains(.notCOmmitTracking)) kernel.panic("Region does not support commit tracking");
+        if (pageOffset >= region.descriptor.pageCount or pageCount > region.descriptor.pageCount - pageOffset) kernel.panic("invalid region offset and page count");
+        if (!region.flags.contains(.normal)) kernel.panic("Cannot decommit from non-normal region");
 
         var delta: i64 = 0;
 
         if (!region.data.u.normal.commit.clear(pageOffset, pageOffset + pageCount, &delta, true)) return false;
 
-        if (delta > 0) std.debug.panic("invalid delta calculation", .{});
+        if (delta > 0) kernel.panic("invalid delta calculation");
         const deltaUnwrapped = @as(u64, @intCast(-delta));
 
-        if (region.data.u.normal.commitPageCount < deltaUnwrapped) std.debug.panic("invalid delta calculation", .{});
+        if (region.data.u.normal.commitPageCount < deltaUnwrapped) kernel.panic("invalid delta calculation");
 
         decommit(deltaUnwrapped * pageSize, region.flags.contains(.fixed));
         space.commitCount -= deltaUnwrapped;
@@ -359,7 +357,7 @@ pub const AddressSpace = extern struct {
         if (region.flags.contains(.normal)) {
             handleNormalRegion(space, region);
         } else if (region.flags.contains(.guard) and !isGuardRegion) {
-            std.debug.panic("Cannot unreserve guard region", .{});
+            kernel.panic("Cannot unreserve guard region");
             return;
         }
 
@@ -466,7 +464,7 @@ pub const AddressSpace = extern struct {
             if (space == &kernel.coreAddressSpace) {
                 if (kernel.mmCoreRegionCount == arch.coreMemRegionCount) return null;
 
-                if (forcedAddr != 0) std.debug.panic("Using a forced address in core address space\n", .{});
+                if (forcedAddr != 0) kernel.panic("Using a forced address in core address space\n");
 
                 {
                     const newRegionCount = kernel.mmCoreRegionCount + 1;
@@ -603,7 +601,7 @@ fn CloseReferenceTask(task: *AsyncTask) void {
 }
 pub fn decommit(byteCount: u64, fixed: bool) callconv(.C) void {
     if (byteCount & (pageSize - 1) != 0) {
-        std.debug.panic("byte count not page-aligned", .{});
+        kernel.panic("byte count not page-aligned");
     }
 
     const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
@@ -625,7 +623,7 @@ fn decommitPages(fixed: bool, requiredPageCount: i64) void {
 
 fn ensureSufficientPages(current: i64, required: i64, errorMessage: []const u8) void {
     if (current < required) {
-        std.debug.panic(errorMessage, .{});
+        kernel.panic(errorMessage);
     }
 }
 
@@ -817,7 +815,7 @@ pub const HeapRegion = extern struct {
     const usedMagic = 0xabcd;
 
     fn removeFree(self: *@This()) void {
-        if (self.regionListRef == null or self.used != 0) std.debug.panic("Invalid free region", .{});
+        if (self.regionListRef == null or self.used != 0) kernel.panic("Invalid free region");
 
         self.regionListRef.?.* = self.u2.regionListNext;
 
@@ -866,7 +864,7 @@ pub const Heap = extern struct {
 
     pub fn alloc(self: *Self, askedSize: u64, isZero: bool) u64 {
         if (askedSize == 0) return 0;
-        if (@as(i64, @bitCast(askedSize)) < 0) std.debug.panic("Invalid size", .{});
+        if (@as(i64, @bitCast(askedSize)) < 0) kernel.panic("Invalid size");
 
         const size = (askedSize + HeapRegion.usedHeaderSize + 0x1F) & ~@as(u64, 0x1F);
 
@@ -920,7 +918,7 @@ pub const Heap = extern struct {
             }
         };
 
-        if (region.used != 0 or region.u1.size < size) std.debug.panic("Invalid region", .{});
+        if (region.used != 0 or region.u1.size < size) kernel.panic("Invalid region");
         self.allocationCount.increment();
         _ = self.size.atomicFetchAdd(size);
 
@@ -971,7 +969,7 @@ pub const Heap = extern struct {
         if (isAlloc) {
             return addressSpace.alloc(size, Region.Flags.fromFlag(.fixed), 0, true);
         } else {
-            if (region == null) std.debug.panic("Invalid region", .{});
+            if (region == null) kernel.panic("Invalid region");
             _ = addressSpace.free(@intFromPtr(region.?), 0, false);
             return 0;
         }
@@ -987,7 +985,7 @@ pub const Heap = extern struct {
 
     fn addFreeRegion(self: *@This(), region: *HeapRegion) void {
         if (region.used != 0 or region.u1.size < 32) {
-            std.debug.panic("heap panic", .{});
+            kernel.panic("heap panic");
         }
 
         const idx = calcHeapIdx(region.u1.size);
@@ -1000,13 +998,13 @@ pub const Heap = extern struct {
     }
 
     fn free(self: *Self, addr: u64, expectedSize: u64) void {
-        if (addr == 0 and expectedSize != 0) std.debug.panic("Invalid free", .{});
+        if (addr == 0 and expectedSize != 0) kernel.panic("Invalid free");
         if (addr == 0) return;
 
         var region = @as(*HeapRegion, @ptrFromInt(addr)).getHeader().?;
 
-        if (region.used != HeapRegion.usedMagic) std.debug.panic("Invalid free", .{});
-        if (expectedSize != 0 and region.u2.allocationSize != expectedSize) std.debug.panic("Invalid free", .{});
+        if (region.used != HeapRegion.usedMagic) kernel.panic("Invalid free");
+        if (expectedSize != 0 and region.u2.allocationSize != expectedSize) kernel.panic("Invalid free");
 
         if (region.u1.size == 0) {
             _ = self.size.atomicFetchSub(region.u2.allocationSize);
@@ -1016,14 +1014,14 @@ pub const Heap = extern struct {
 
         const firstRegion = @as(*HeapRegion, @ptrFromInt(@intFromPtr(region) - region.offset + 65536 - 32));
         if (@as(**Heap, @ptrFromInt(firstRegion.getData())).* != self) {
-            std.debug.panic("Heap mismatch: the first region's data does not point to the expected heap", .{});
+            kernel.panic("Heap mismatch: the first region's data does not point to the expected heap");
         }
 
         _ = self.mutex.acquire();
         self.validate();
 
         region.used = 0;
-        if (region.offset < region.previous) std.debug.panic("Region offset is less than the previous region offset", .{});
+        if (region.offset < region.previous) kernel.panic("Region offset is less than the previous region offset");
 
         self.allocationCount.decrement();
         _ = self.size.atomicFetchSub(region.u1.size);
@@ -1046,7 +1044,7 @@ pub const Heap = extern struct {
         }
 
         if (region.u1.size == 65536 - 32) {
-            if (region.offset != 0) std.debug.panic("Invalid region offset", .{});
+            if (region.offset != 0) kernel.panic("Invalid region offset");
             self.blockCount.decrement();
 
             if (self.canValidate) {
@@ -1058,7 +1056,7 @@ pub const Heap = extern struct {
                         found = true;
                         break;
                     } else {
-                        std.debug.panic("Invalid block", .{});
+                        kernel.panic("Invalid block");
                     }
                 }
             }
@@ -1074,7 +1072,7 @@ pub const Heap = extern struct {
 
     //Todo?: should I keep this version
     // fn free(self: *Self, addr: u64, expectedSize: u64) void {
-    //     if (addr == 0 and expectedSize != 0) std.debug.panic("Invalid free", .{});
+    //     if (addr == 0 and expectedSize != 0) kernel.panic("Invalid free" );
     //     if (addr == 0) return;
 
     //     var region = @as(*HeapRegion, @ptrFromInt(addr)).getHeader().?;
@@ -1104,8 +1102,8 @@ pub const Heap = extern struct {
     // }
 
     // fn validateRegionHeader(region: *HeapRegion, expectedSize: u64) void {
-    //     if (region.used != HeapRegion.usedMagic) std.debug.panic("Invalid free", .{});
-    //     if (expectedSize != 0 and region.u2.allocationSize != expectedSize) std.debug.panic("Invalid free", .{});
+    //     if (region.used != HeapRegion.usedMagic) kernel.panic("Invalid free" );
+    //     if (expectedSize != 0 and region.u2.allocationSize != expectedSize) kernel.panic("Invalid free" );
     // }
 
     // fn handleFreeZeroSizeRegion(self: *Self, region: *HeapRegion) void {
@@ -1119,12 +1117,12 @@ pub const Heap = extern struct {
 
     // fn validateHeap(self: Self, firstRegion: *HeapRegion) void {
     //     if (@as(**Heap, @ptrFromInt(firstRegion.getData())).* != self) {
-    //         std.debug.panic("Heap mismatch: the first region's data does not point to the expected heap", .{});
+    //         kernel.panic("Heap mismatch: the first region's data does not point to the expected heap" );
     //     }
     // }
 
     // fn handleRegionOffsets(region: *HeapRegion) void {
-    //     if (region.offset < region.previous) std.debug.panic("Region offset is less than the previous region offset", .{});
+    //     if (region.offset < region.previous) kernel.panic("Region offset is less than the previous region offset" );
     // }
 
     // fn mergeAdjacentFreeRegions(region: *HeapRegion) void {
@@ -1148,7 +1146,7 @@ pub const Heap = extern struct {
 
     // fn handleFullRegion(self: *Self, region: *HeapRegion) void {
     //     if (region.u1.size == 65536 - 32) {
-    //         if (region.offset != 0) std.debug.panic("Invalid region offset", .{});
+    //         if (region.offset != 0) kernel.panic("Invalid region offset" );
     //         self.blockCount.decrement();
 
     //         if (self.canValidate) {
@@ -1160,7 +1158,7 @@ pub const Heap = extern struct {
     //                     found = true;
     //                     break;
     //                 } else {
-    //                     std.debug.panic("Invalid block", .{});
+    //                     kernel.panic("Invalid block" );
     //                 }
     //             }
     //         }
@@ -1190,7 +1188,7 @@ pub const Heap = extern struct {
             }
 
             if (region != end) {
-                std.debug.panic("heap panic: region does not match expected end", .{});
+                kernel.panic("heap panic: region does not match expected end");
             }
         }
     }
@@ -1198,34 +1196,34 @@ pub const Heap = extern struct {
     fn validateRegion(start: *HeapRegion, region: *HeapRegion, maybePrev: ?*HeapRegion) void {
         if (maybePrev) |previous| {
             if (@intFromPtr(previous) != @intFromPtr(region.getPrev())) {
-                std.debug.panic("heap panic: previous region mismatch", .{});
+                kernel.panic("heap panic: previous region mismatch");
             }
         } else {
             if (region.previous != 0) {
-                std.debug.panic("heap panic: invalid previous pointer for first region", .{});
+                kernel.panic("heap panic: invalid previous pointer for first region");
             }
         }
 
         if (region.u1.size & 31 != 0) {
-            std.debug.panic("heap panic: size misalignment", .{});
+            kernel.panic("heap panic: size misalignment");
         }
 
         if (@intFromPtr(region) - @intFromPtr(start) != region.offset) {
-            std.debug.panic("heap panic: offset mismatch", .{});
+            kernel.panic("heap panic: offset mismatch");
         }
 
         if (region.used != HeapRegion.usedMagic and region.used != 0) {
-            std.debug.panic("heap panic: invalid usage flag", .{});
+            kernel.panic("heap panic: invalid usage flag");
         }
 
         if (region.used == 0 and region.regionListRef == null) {
-            std.debug.panic("heap panic: invalid region list reference for free region", .{});
+            kernel.panic("heap panic: invalid region list reference for free region");
         }
 
         if (region.used == 0 and region.u2.regionListNext != null and
             region.u2.regionListNext.?.regionListRef != &region.u2.regionListNext)
         {
-            std.debug.panic("heap panic: invalid region list linkage", .{});
+            kernel.panic("heap panic: invalid region list linkage");
         }
     }
 };
@@ -1283,7 +1281,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
     const simple = count == 1 and alignment == 1 and below == 0;
 
     if (!kernel.physicalMemoryManager.pageFrameDBInitialized) {
-        if (!simple) std.debug.panic("non-simple allocation before initialization of the pageframe database", .{});
+        if (!simple) kernel.panic("non-simple allocation before initialization of the pageframe database");
         const page = arch.EarlyAllocPage();
         if (flags.contains(.zeroed)) {
             _ = arch.mapPage(&kernel.coreAddressSpace, page, @intFromPtr(&earlyZeroBuffer), MapPageFlags.fromFlags(.{ .overwrite, .noNewTables, .frameLockAquired }));
@@ -1296,7 +1294,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
         if (pages != std.math.maxInt(u64)) {
             MMPhysicalActivatePages(pages, count);
             var address = pages << pageBitCount;
-            if (flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), count, true); //todo!: implement PMZero
+            if (flags.contains(.zeroed)) PMZero(@as([*]u64, @ptrCast(&address)), count, true);
             return address;
         }
     } else {
@@ -1317,44 +1315,44 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
             const frame = &kernel.physicalMemoryManager.pageFrames[page];
 
             switch (frame.state.readVolatile()) {
-                .active => std.debug.panic("corrupt page frame database", .{}),
+                .active => kernel.panic("corrupt page frame database"),
                 .standby => {
                     if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
-                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                        kernel.panic("corrupt shared reference back pointer in frame");
                     }
 
                     frame.cacheRef.?.* = 0;
                 },
                 .modified => {
                     if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
-                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                        kernel.panic("corrupt shared reference back pointer in frame");
                     }
 
                     frame.cacheRef.?.* = 0;
                 },
                 .modifiedNoRead => {
                     if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
-                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                        kernel.panic("corrupt shared reference back pointer in frame");
                     }
 
                     frame.cacheRef.?.* = 0;
                 },
                 .modifiedNoReadNoExecute => {
                     if (frame.cacheRef.?.* != ((page << pageBitCount) | 1)) {
-                        std.debug.panic("corrupt shared reference back pointer in frame", .{});
+                        kernel.panic("corrupt shared reference back pointer in frame");
                     }
 
                     frame.cacheRef.?.* = 0;
                 },
                 .bad => {
-                    std.debug.panic("bad page frame", .{});
+                    kernel.panic("bad page frame");
                 },
                 .unusable => {
-                    std.debug.panic("unusable page frame", .{});
+                    kernel.panic("unusable page frame");
                 },
                 .free => {
                     if (kernel.physicalMemoryManager.freePageCount == 0) {
-                        std.debug.panic("freePageCount underflow", .{});
+                        kernel.panic("freePageCount underflow");
                     }
                     _ = kernel.physicalMemoryManager.freePageCount.atomicSub(1, .SeqCst);
                 },
@@ -1373,7 +1371,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
     }
 
     if (!flags.contains(.canFail)) {
-        std.debug.panic("out of memory", .{});
+        kernel.panic("out of memory");
     }
 
     decommit(@as(u64, @intCast(commitNow)), true);
@@ -1381,7 +1379,7 @@ export fn physicalAlloc(flags: Physical.Flags, count: u64, alignment: u64, below
 }
 
 pub export fn commit(byteCount: u64, fixed: bool) callconv(.C) bool {
-    if (byteCount & (pageSize - 1) != 0) std.debug.panic("Bytes should be page-aligned", .{});
+    if (byteCount & (pageSize - 1) != 0) kernel.panic("Bytes should be page-aligned");
 
     const requiredPageCount = @as(i64, @intCast(byteCount / pageSize));
 
@@ -1430,7 +1428,7 @@ export fn MMPhysicalActivatePages(pages: u64, count: u64) callconv(.C) void {
             .modifiedNoReadNoWriteNoExecute => kernel.physicalMemoryManager.modifiedNoReadNoWriteNoExecutePageCount -= 1,
             .modifiedNoReadNoExecute => kernel.physicalMemoryManager.modifiedNoReadNoExecutePageCount -= 1,
             .modifiedNoWriteNoExecute => kernel.physicalMemoryManager.modifiedNoWriteNoExecutePageCount -= 1,
-            else => std.debug.panic("Corrupt page frame database", .{}),
+            else => kernel.panic("Corrupt page frame database"),
         }
 
         frame.u.list.prev.?.* = frame.u.list.next.readVolatile();
@@ -1455,7 +1453,7 @@ export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void {
         _ = kernel.physicalMemoryManager.availableCriticalEvent.set(true);
 
         if (!increase) {
-            std.debug.panic("decreased available page count", .{});
+            kernel.panic("decreased available page count");
         }
     }
 
@@ -1467,17 +1465,17 @@ export fn MMUpdateAvailablePageCount(increase: bool) callconv(.C) void {
 }
 
 pub fn physicalFree(askedPage: u64, mtxAlreadyAquired: bool, count: u64) callconv(.C) void {
-    if (askedPage == 0) std.debug.panic("invalid page", .{});
+    if (askedPage == 0) kernel.panic("invalid page");
 
     if (mtxAlreadyAquired) kernel.physicalMemoryManager.pageFrameMutex.assertLocked() else _ = kernel.physicalMemoryManager.pageFrameMutex.acquire();
-    if (!kernel.physicalMemoryManager.pageFrameDBInitialized) std.debug.panic("PMM not yet initialized", .{});
+    if (!kernel.physicalMemoryManager.pageFrameDBInitialized) kernel.panic("PMM not yet initialized");
 
     const page = askedPage >> pageBitCount;
 
     MMPhysicalInsertFreePagesStart();
 
     for (kernel.physicalMemoryManager.pageFrames[0..count]) |*frame| {
-        if (frame.state.readVolatile() == .free) std.debug.panic("attempting to free a free page", .{});
+        if (frame.state.readVolatile() == .free) kernel.panic("attempting to free a free page");
         if (kernel.physicalMemoryManager.commitFixedLimit != 0) kernel.physicalMemoryManager.activePageCount -= 1;
         physicalInsertFreePagesNext(page);
     }

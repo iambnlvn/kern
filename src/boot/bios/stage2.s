@@ -410,7 +410,7 @@ error:
 
 enableVideoMode:
     call vbeInit
-    jmp enableVideoModeDone ; TODO!add this marker later below
+    jmp enableVideoModeDone
 
 
 vbeInit:
@@ -937,7 +937,7 @@ findProgramHeaders:
     mov r8, 0xFFFFFF7FBFDFE000
     mov rbx, [r8 + rax * 8]
     cmp rbx, 0
-    jne .hasPdp ;Todo: implement this
+    jne .hasPdp
     mov rbx, [pageTableAllocOffset]
     add rbx, pageDirectory
     or rbx, 7

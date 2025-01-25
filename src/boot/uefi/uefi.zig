@@ -213,7 +213,6 @@ const GDT = extern struct {
                 .limit = limit,
                 .access = access,
             };
-            //TODO!: this is prolly not correct, not sure!!
             return @as(*align(1) const u64, @ptrCast(&entry));
         }
     };
@@ -432,30 +431,6 @@ pub fn main() noreturn {
             const l2Idx: u64 = calculateIndex(vA, 1, pageBitCount, entryPerPageTableBitCount);
             const l1Idx: u64 = calculateIndex(vA, 0, pageBitCount, entryPerPageTableBitCount);
 
-            //TOdo?: which one should I keep
-            // var l4Table = @as([*]u64, @ptrFromInt(0x140000));
-
-            // if (l4Table[l4Idx] & 1 == 0) {
-            //     l4Table[l4Idx] = nextPageTable | 0xb111;
-            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
-            //     nextPageTable += pageSize;
-            // }
-
-            // var l3Table = @as([*]u64, l4Table[l4Idx] & ~@as(u64, pageSize - 1));
-            // if (l3Table[l3Idx] & 1 == 0) {
-            //     l4Table[l3Idx] = nextPageTable | 0xb111;
-            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
-            //     nextPageTable += pageSize;
-            // }
-
-            // var l2Table = @as([*]u64, l3Table[l3Idx] & ~@as(u64, pageSize - 1));
-            // if (l2Table[l2Idx] & 1 == 0) {
-            //     l2Table[l2Idx] = nextPageTable | 0xb111;
-            //     @memset(@as([*]u8, nextPageTable[0..pageSize]), 0);
-            //     nextPageTable += pageSize;
-            // }
-            // var l1Table = @as([*]u64, l2Table[l2Idx] & ~@as(u64, pageSize - 1));
-            // l1Table[l1Idx] = physicalAddr | 0xb111;
             const l4Table = @as([*]u64, @ptrFromInt(0x140000));
             const l3Table = initializeTable(l4Table, l4Idx, nextPageTable, pageSize);
             const l2Table = initializeTable(l3Table, l3Idx, nextPageTable, pageSize);
@@ -472,10 +447,9 @@ pub fn main() noreturn {
         var baseVA = progHeader.vaddr & 0xFFFFFFFFFFFFF000;
 
         for (kernelPages[0..kernelPageCount]) |kp| {
-            //TODO?: is this correct?
-            // if (kp >= baseVA and kp < baseVA + page2allocCount * pageSize) {
-            //     kp = 0;
-            // }
+            if (kp >= baseVA and kp < baseVA + page2allocCount * pageSize) {
+                kp = 0;
+            }
             if (kp >= baseVA) {
                 baseVA += pageSize;
                 page2allocCount -= 1;
