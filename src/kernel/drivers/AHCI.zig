@@ -703,6 +703,25 @@ pub const Drive = extern struct {
     port: u64,
 
     const maxCount = 64;
+
+    pub fn readFile(self: *@This(), fileBuffer: []u8, fileDescriptor: *const kernel.FileSytem.File.Descriptor) kernel.files.ReadError!void {
+        if (fileDescriptor.offset & (self.blockDevice.sectorSize - 1) != 0) kernel.panic("Disk offset should be sector-aligned");
+        const sectorAlignedSize = kUtils.alignu64(fileDescriptor.size, self.blockDevice.sectorSize);
+        if (fileBuffer.len < sectorAlignedSize) kernel.panic("Buffer too small\n");
+
+        var buffer = kernel.zeroes(DMABuffer);
+        buffer.virtualAddr = @intFromPtr(fileBuffer.ptr);
+
+        var request = kernel.zeroes(BlockDevice.AccessRequest);
+        request.offset = fileDescriptor.offset;
+        request.count = sectorAlignedSize;
+        request.operation = BlockDevice.read;
+        request.device = &self.blockDevice;
+        request.buffer = &buffer;
+
+        const result = FSBlockDeviceAccess(request);
+        if (result != kernel.ES_SUCCESS) return kernel.files.ReadError.failed;
+    }
 };
 
 const DriveType = enum(u8) {

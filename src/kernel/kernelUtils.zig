@@ -44,3 +44,8 @@ pub const RandomNumberGenerator = extern struct {
         self.lock.release();
     }
 };
+
+pub fn alignu64(address: u64, alignment: u64) u64 {
+    const mask = alignment - 1;
+    return (address + mask) & ~mask;
+}
