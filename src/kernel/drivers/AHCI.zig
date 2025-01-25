@@ -782,7 +782,7 @@ const BlockDevice = extern struct {
         request.count = bytesToRead;
         request.op = read;
         request.buffer = &dmaBuffer;
-        //TODO?: should have access
+        if (FSBlockDeviceAccess(request) != kernel.ES_SUCCESS) kernel.panic("Could not read disk");
 
         if (!self.checkMbr()) kernel.panic("Only MBR is supported\n");
 
