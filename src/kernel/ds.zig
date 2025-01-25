@@ -1,5 +1,5 @@
 const std = @import("std");
-const panic = std.debug.panic; //TODO!: this should be replaced with a kernel panic once implemented
+const panic = kernel.panic;
 const zeroes = @import("kernel.zig").zeroes;
 const kernel = @import("kernel.zig");
 const addressSpace = kernel.addrSpace;
@@ -27,14 +27,12 @@ pub fn LinkedList(comptime T: type) type {
             pub fn removeFromList(self: *@This()) void {
                 if (self.list) |list| {
                     list.remove(self);
-                } else {
-                    panic("list null when trying to remove node", .{});
-                }
+                } else panic("list null when trying to remove node");
             }
         };
 
         pub fn prepend(self: *@This(), node: *Node) void {
-            if (node.list != null) panic("inserting an node that is already in a list", .{});
+            if (node.list != null) panic("inserting an node that is already in a list");
 
             if (self.first) |first| {
                 node.next = first;
@@ -54,7 +52,7 @@ pub fn LinkedList(comptime T: type) type {
         }
 
         pub fn append(self: *@This(), node: *Node) void {
-            if (node.list != null) panic("inserting an node that is already in a list", .{});
+            if (node.list != null) panic("inserting an node that is already in a list");
 
             if (self.last) |last| {
                 node.previous = last;
@@ -74,7 +72,7 @@ pub fn LinkedList(comptime T: type) type {
         }
 
         pub fn insertbefore(self: *@This(), node: *Node, before: *Node) void {
-            if (node.list != null) panic("inserting an node that is already in a list", .{});
+            if (node.list != null) panic("inserting an node that is already in a list");
 
             if (before != self.first) {
                 node.previous = before.previous;
@@ -94,10 +92,8 @@ pub fn LinkedList(comptime T: type) type {
 
         pub fn remove(self: *@This(), node: *Node) void {
             if (node.list) |list| {
-                if (list != self) panic("node is in another list", .{});
-            } else {
-                panic("node is not in any list", .{});
-            }
+                if (list != self) panic("node is in another list");
+            } else panic("node is not in any list");
 
             if (node.previous) |previous| previous.next = node.next else self.first = node.next;
 
@@ -113,7 +109,7 @@ pub fn LinkedList(comptime T: type) type {
 
         fn validate(self: *@This()) void {
             if (self.count == 0) {
-                if (self.first != null or self.last != null) panic("invalid list", .{});
+                if (self.first != null or self.last != null) panic("invalid list");
             } else if (self.count == 1) {
                 if (self.first != self.last or
                     self.first.?.previous != null or
@@ -121,14 +117,14 @@ pub fn LinkedList(comptime T: type) type {
                     self.first.?.list != self or
                     self.first.?.value == null)
                 {
-                    panic("invalid list", .{});
+                    panic("invalid list");
                 }
             } else {
                 if (self.first == self.last or
                     self.first.?.previous != null or
                     self.last.?.next != null)
                 {
-                    panic("invalid list", .{});
+                    panic("invalid list");
                 }
 
                 {
@@ -140,13 +136,13 @@ pub fn LinkedList(comptime T: type) type {
                         if (index == 0) break;
 
                         if (node.?.next == node or node.?.list != self or node.?.value == null) {
-                            panic("invalid list", .{});
+                            panic("invalid list");
                         }
 
                         node = node.?.next;
                     }
 
-                    if (node != self.last) panic("invalid list", .{});
+                    if (node != self.last) panic("invalid list");
                 }
 
                 {
@@ -158,13 +154,13 @@ pub fn LinkedList(comptime T: type) type {
                         if (index == 0) break;
 
                         if (node.?.previous == node) {
-                            panic("invalid list", .{});
+                            panic("invalid list");
                         }
 
                         node = node.?.previous;
                     }
 
-                    if (node != self.first) panic("invalid list", .{});
+                    if (node != self.first) panic("invalid list");
                 }
             }
         }
@@ -201,7 +197,7 @@ pub fn AVLTree(comptime T: type) type {
 
         pub fn insert(self: *@This(), node: *Node, nodevalue: ?*T, key: KeyDefaultType, dupkeypol: DuplicateKeyPolicy) bool {
             if (node.tree != null) {
-                panic("Node already inserted in the tree. Cannot insert again.", .{});
+                panic("Node already inserted in the tree. Cannot insert again.");
             }
 
             node.tree = self;
@@ -219,7 +215,7 @@ pub fn AVLTree(comptime T: type) type {
                 if (link.*) |n| {
                     const cmp = n.compare(node);
                     if (cmp == 0) {
-                        if (dupkeypol == .panic) panic("Duplicate key found. Insert operation failed.", .{}) else if (dupkeypol == .fail) return false;
+                        if (dupkeypol == .panic) panic("Duplicate key found. Insert operation failed.") else if (dupkeypol == .fail) return false;
                     }
 
                     const childIdx = @intFromBool(cmp > 0);
@@ -291,12 +287,12 @@ pub fn AVLTree(comptime T: type) type {
         }
 
         pub fn remove(self: *@This(), node: *Node) void {
-            if (self.modcheck) panic("Concurrent modification detected. Tree is being modified while iterating.", .{});
+            if (self.modcheck) panic("Concurrent modification detected. Tree is being modified while iterating.");
             self.modcheck = true;
             defer self.modcheck = false;
 
             self.validate();
-            if (node.tree != self) panic("Attempt to remove a node not part of this tree.", .{});
+            if (node.tree != self) panic("Attempt to remove a node not part of this tree.");
 
             var fakeRoot = zeroes(Node);
             self.root.?.parent = &fakeRoot;
@@ -367,7 +363,7 @@ pub fn AVLTree(comptime T: type) type {
 
             self.root = fakeRoot.children[0];
             if (self.root) |root| {
-                if (root.parent != &fakeRoot) panic("Root's parent mismatch after removal.", .{});
+                if (root.parent != &fakeRoot) panic("Root's parent mismatch after removal.");
                 root.parent = null;
             }
 
@@ -405,7 +401,7 @@ pub fn AVLTree(comptime T: type) type {
         }
 
         pub fn find(self: *@This(), key: KeyDefaultType, searchMode: SearchMode) ?*Node {
-            if (self.modcheck) panic("Concurrent access detected. Tree is being modified while searching.", .{});
+            if (self.modcheck) panic("Concurrent access detected. Tree is being modified while searching.");
             self.validate();
             return self.findRecuresively(self.root, key, searchMode);
         }
@@ -510,10 +506,10 @@ pub fn AVLTree(comptime T: type) type {
 
             fn validate(self: *@This(), tree: ?*Tree, parent: ?*Node) bool {
                 if (self.parent != parent) {
-                    panic("Node parent mismatch: expected {:?}, found {:?}.", .{ parent, self.parent });
+                    kernel.panicf("Node parent mismatch: expected {:?}, found {:?}.", .{ parent, self.parent });
                 }
                 if (self.tree != tree) {
-                    panic("Node tree mismatch: expected {:?}, found {:?}.", .{ tree, self.tree });
+                    kernel.panicf("Node tree mismatch: expected {:?}, found {:?}.", .{ tree, self.tree });
                 }
                 return true;
             }
@@ -527,7 +523,7 @@ pub const List = extern struct {
 
     pub fn insert(self: *@This(), node: *List, start: bool) void {
         if (node.prevOrLast != null or node.nextOrFirst != null) {
-            panic("bad links", .{});
+            panic("bad links");
         }
 
         if (self.nextOrFirst == null and self.prevOrLast == null) {
@@ -549,7 +545,7 @@ pub const List = extern struct {
     }
 
     pub fn remove(self: *@This()) void {
-        if (self.prevOrLast.?.nextOrFirst != self or self.nextOrFirst.?.prevOrLast != self) panic("bad links", .{});
+        if (self.prevOrLast.?.nextOrFirst != self or self.nextOrFirst.?.prevOrLast != self) panic("bad links");
 
         if (self.prevOrLast == self.nextOrFirst) {
             self.nextOrFirst.?.nextOrFirst = null;
@@ -621,7 +617,6 @@ pub fn Bitflag(comptime EnumType: type) type {
             return self.bits == 0;
         }
 
-        //Todo?: check if this is correct (I guess yes)
         pub inline fn isAll(self: @This()) bool {
             const validBits = all().bits;
             return (self.bits & validBits) == self.bits and self.bits == validBits;
@@ -767,7 +762,7 @@ pub fn Array(comptime T: type, comptime heapType: HeapType) type {
             if (self.ptr) |ptr| {
                 return ptr[0..self.length()];
             } else {
-                std.debug.panic("null array", .{});
+                panic("null array");
             }
         }
 
@@ -850,7 +845,7 @@ pub const Range = extern struct {
             return true;
         }
         pub fn set(self: *Self, from: u64, to: u64, maybeDelta: ?*i64, modify: bool) bool {
-            if (to <= from) std.debug.panic("invalid range", .{});
+            if (to <= from) panic("invalid range");
 
             const initLen = self.ranges.length();
             if (initLen == 0) {
@@ -907,7 +902,7 @@ pub const Range = extern struct {
             return true;
         }
         pub fn clear(self: *Self, from: u64, to: u64, maybeDelta: ?*i64, modify: bool) bool {
-            if (to <= from) std.debug.panic("invalid range", .{});
+            if (to <= from) panic("invalid range");
 
             if (self.ranges.length() == 0) {
                 if (from < self.contiguous and self.contiguous != 0) {
@@ -974,9 +969,9 @@ pub const Range = extern struct {
             const tempDelta: i64 = 0;
 
             if (overlapCount == 1) {
-                std.debug.panic("not implemented", .{});
+                panic("not implemented");
             } else if (overlapCount > 1) {
-                std.debug.panic("not implemented", .{});
+                panic("not implemented");
             }
 
             if (maybeDelta) |delta| delta.* = tempDelta;
@@ -989,8 +984,8 @@ pub const Range = extern struct {
             if (self.ranges.length() == 0) return;
             var prevTo: u64 = 0;
             for (self.ranges.getSlice()) |range| {
-                if (prevTo != 0 and range.from <= prevTo) std.debug.panic("range in set is not placed after the prior range", .{});
-                if (range.from >= range.to) std.debug.panic("Invalid range in set", .{});
+                if (prevTo != 0 and range.from <= prevTo) panic("range in set is not placed after the prior range");
+                if (range.from >= range.to) panic("Invalid range in set");
 
                 prevTo = range.to;
             }
@@ -1002,7 +997,7 @@ pub export fn _ArrayInsert(array: *?*u64, item: u64, itemSize: u64, maybePos: i6
     const oldArrLen = ArrayHeaderGetLength(array.*);
     const position: u64 = if (maybePos == -1) oldArrLen else @as(u64, @intCast(maybePos));
 
-    if (maybePos < 0 or position > oldArrLen) std.debug.panic("position out of bounds", .{});
+    if (maybePos < 0 or position > oldArrLen) panic("position out of bounds");
 
     if (!_ArraySetLength(array, oldArrLen + 1, itemSize, additionalHeaderBytes, heap)) return 0;
 
@@ -1060,8 +1055,8 @@ pub export fn _ArrayDelete(array: ?*u64, position: u64, itemSize: u64, count: u6
     if (count == 0) return;
 
     const oldArrLen = ArrayHeaderGetLength(array);
-    if (position >= oldArrLen) std.debug.panic("position out of bounds", .{});
-    if (count > oldArrLen - position) std.debug.panic("count out of bounds", .{});
+    if (position >= oldArrLen) panic("position out of bounds");
+    if (count > oldArrLen - position) panic("count out of bounds");
 
     ArrayHeaderGet(array).length = oldArrLen - count;
     const arrayAddress = @intFromPtr(array);
