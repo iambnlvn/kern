@@ -61,7 +61,7 @@ pub const SpinLock = extern struct {
         if (kernel.scheduler.panic.readVolatile()) return;
 
         if (self.state.readVolatile() == 0 or arch.areInterruptsEnabled()) {
-            std.debug.panic("Spinlock not correctly acquired\n", .{});
+            kernel.panic("Spinlock not correctly acquired\n");
         }
     }
 };
@@ -76,7 +76,7 @@ pub const Event = extern struct {
     pub fn set(self: *Self, defaultFlag: ?bool) bool {
         const flag = defaultFlag orelse false;
         if (self.state.readVolatile() != 0 and !flag) {
-            std.debug.panic("Event already set", .{});
+            kernel.panic("Event already set");
         }
 
         kernel.scheduler.dispatchSpinLock.acquire();
@@ -97,7 +97,7 @@ pub const Event = extern struct {
 
     pub fn reset(self: *Self) void {
         if (self.blockedThreads.first != null and self.state.readVolatile() != 0) {
-            std.debug.panic("Event has blocked threads", .{});
+            kernel.panic("Event has blocked threads");
         }
         self.state.writeVolatile(0);
     }
@@ -136,7 +136,7 @@ pub const Event = extern struct {
 
     pub fn waitMultiple(_: Self, evPtr: [*]*Event, evLen: u64) u8 {
         const events = evPtr[0..evLen];
-        if (events.len == 0) std.debug.panic("No events") else if (events.len > kernel.MAX_WAIT_COUNT) std.debug.panic("Too many events", .{}) else if (!arch.areInterruptsEnabled()) std.debug.panic("Interrupts disabled", .{});
+        if (events.len == 0) kernel.panic("No events") else if (events.len > kernel.MAX_WAIT_COUNT) kernel.panic("Too many events") else if (!arch.areInterruptsEnabled()) kernel.panic("Interrupts disabled");
 
         const thread = arch.getCurrentThread().?;
         thread.blocking.event.count = events.len;
@@ -222,7 +222,7 @@ pub const WriterLock = extern struct {
                     arch.fakeTimeInterrupt();
                     thread.state.writeVolatile(.active);
                 } else {
-                    std.debug.panic("No current thread", .{}); // the scheduler should always have a current thread otherwise it is a bug(schuduler not ready)
+                    kernel.panic("No current thread"); // the scheduler should always have a current thread otherwise it is a bug(schuduler not ready)
                 }
             }
         }
@@ -235,14 +235,14 @@ pub const WriterLock = extern struct {
 
         switch (state) {
             -1 => {
-                if (!write) kernel.panic("attempt to return shared access to an exclusively owned lock\n", .{});
+                if (!write) kernel.panic("attempt to return shared access to an exclusively owned lock\n");
                 self.state.writeVolatile(0);
             },
             0 => {
-                std.debug.panic("attempt to return access to an unowned lock\n", .{});
+                kernel.panic("attempt to return access to an unowned lock\n");
             },
             else => {
-                if (write) std.debug.panic("attempting to return exclusive access to a shared lock\n", .{});
+                if (write) kernel.panic("attempting to return exclusive access to a shared lock\n");
                 self.state.decrement();
             },
         }
@@ -255,17 +255,17 @@ pub const WriterLock = extern struct {
     }
 
     pub fn assertLocked(self: *Self) void {
-        if (self.state.readVolatile() == 0) std.debug.panic("unlocked\n", .{});
+        if (self.state.readVolatile() == 0) kernel.panic("unlocked\n");
     }
 
     pub fn assertExclusive(self: *Self) void {
         const lockState = self.state.readVolatile();
-        if (lockState == 0) std.debug.panic("unlocked\n", .{}) else if (lockState > 0) std.debug.panic("shared mode\n", .{});
+        if (lockState == 0) kernel.panic("unlocked\n") else if (lockState > 0) kernel.panic("shared mode\n");
     }
 
     pub fn assertShared(self: *Self) void {
         const state = self.state.readVolatile();
-        if (state == 0) std.debug.panic("unlocked\n", .{}) else if (state < 0) std.debug.panic("exclusive mode\n", .{});
+        if (state == 0) kernel.panic("unlocked\n") else if (state < 0) kernel.panic("exclusive mode\n");
     }
 
     pub fn convExclusiveToShared(self: *Self) void {
@@ -289,11 +289,11 @@ pub const Mutex = extern struct {
             const threadAddr = addrBlk: {
                 if (arch.getCurrentThread()) |th| {
                     if (th.terminatableState.readVolatile() == .terminatable) {
-                        std.debug.panic("terminatable thread trying to acquire a mutex", .{}); //Todo!: this should be a kernel panic
+                        kernel.panic("terminatable thread trying to acquire a mutex");
                     }
 
                     if (self.ownerThread != null and self.ownerThread != th) {
-                        std.debug.panic("thread trying to acquire a mutex that is already owned", .{}); //Todo!: this should be a kernel panic
+                        kernel.panic("thread trying to acquire a mutex that is already owned");
                     }
                     break :addrBlk @intFromPtr(th);
                 } else {
@@ -304,7 +304,7 @@ pub const Mutex = extern struct {
         };
 
         if (!arch.areInterruptsEnabled()) {
-            std.debug.panic("mutex acquire with interrupts disabled", .{}); //Todo!: this should be a kernel panic
+            kernel.panic("mutex acquire with interrupts disabled");
         }
         while (true) {
             kernel.scheduler.dispatchSpinLock.acquire();
@@ -319,7 +319,7 @@ pub const Mutex = extern struct {
             if (arch.getLocalStorage()) |ls| {
                 if (ls.isSchedulerReady) {
                     if (currentThread.state.readVolatile() != .active) {
-                        std.debug.panic("thread trying to acquire a mutex while not active", .{}); //Todo!: this should be a kernel panic
+                        kernel.panic("thread trying to acquire a mutex while not active");
                     }
 
                     currentThread.blocking.mutex = self;
@@ -352,7 +352,7 @@ pub const Mutex = extern struct {
         @fence(.SeqCst);
 
         if (self.ownerThread != currentThread) {
-            std.debug.panic("mutex acquire failed due to invalid owner thread", .{}); //Todo!: this should be a kernel panic
+            kernel.panic("mutex acquire failed due to invalid owner thread");
         }
         return true;
     }
@@ -366,7 +366,7 @@ pub const Mutex = extern struct {
         kernel.scheduler.dispatchSpinLock.acquire();
         if (maybeCurrentThread) |currentThread| {
             if (@cmpxchgStrong(?*align(1) volatile Thread, &self.ownerThread, currentThread, null, .SeqCst, .SeqCst) != null) {
-                std.debug.panic("mutex release failed due to invalid owner thread", .{});
+                kernel.panic("mutex release failed due to invalid owner thread");
             }
         } else {
             self.ownerThread = null;
@@ -394,7 +394,7 @@ pub const Mutex = extern struct {
         if (self.ownerThread != currentThread) {
             const ownerThreadId = if (self.ownerThread) |owner| owner.id else 0;
             const currentThreadId = currentThread.id;
-            std.debug.panic("mutex not locked by current thread. Owner thread ID: {}, Current thread ID: {}", .{ ownerThreadId, currentThreadId }); //Todo!: this should be a kernel panic
+            kernel.panic("mutex not locked by current thread. Owner thread ID: {}, Current thread ID: {}", .{ ownerThreadId, currentThreadId });
         }
     }
 };
