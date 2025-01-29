@@ -142,7 +142,7 @@ pub const Thread = extern struct {
         kernel.object.closeHandle(thread, 0);
     }
     pub fn spawn(startAddr: u64, arg1: u64, flags: Thread.Flags, maybeProc: ?*Process, arg2: u64) callconv(.C) ?*Thread {
-        if (startAddr == 0 and !flags.contains(.idle)) std.debug.panic("Start address is 0", .{});
+        if (startAddr == 0 and !flags.contains(.idle)) kernel.panic("Start address is 0");
         const isUserLand = flags.contains(.isUserLand);
         const parentThread = arch.getCurrentThread();
         const process = if (maybeProc) |proc| proc else &kernel.process;
@@ -303,8 +303,8 @@ pub const Process = extern struct {
     });
 
     pub fn crash(self: *Process, crashReason: *kernel.CrashReason) callconv(.C) void {
-        if (self == &kernel.process) std.debug.panic("kernel process has crashed", .{});
-        if (self.type != .normal) std.debug.panic("A critical process has crashed", .{});
+        if (self == &kernel.process) kernel.panic("kernel process has crashed");
+        if (self.type != .normal) kernel.panic("A critical process has crashed");
 
         const pauseFlag = false;
         _ = self.crashMutex.acquire();
@@ -392,7 +392,7 @@ pub const Scheduler = extern struct {
 
         while (true) {
             if (@intFromPtr(unblockedThread)) {
-                std.debug.panic("unblockedThread is null");
+                kernel.panic("unblockedThread is null");
             }
 
             const nextUnblockedThread = unblockedThread.?.next;
@@ -423,12 +423,12 @@ pub const Scheduler = extern struct {
 
     pub fn maybeUpdateList(self: *@This(), thread: *Thread) void {
         if (thread.type == .asyncTask) return;
-        if (thread.type != .normal) std.debug.panic("trying to update the active list of a non-normal thread", .{});
+        if (thread.type != .normal) kernel.panic("trying to update the active list of a non-normal thread");
 
         self.dispatchSpinLock.assertLocked();
 
         if (thread.state.readVolatile() != .active or thread.executing.readVolatile()) return;
-        if (thread.item.list == null) std.debug.panic("Thread is active and not executing, but it is not found in any active thread list. Thread ID: {}, State: {}", .{ thread.id, thread.state });
+        if (thread.item.list == null) kernel.panic("Thread is active and not executing, but it is not found in any active thread list. Thread ID: {}, State: {}", .{ thread.id, thread.state });
 
         const effectivePriority = @as(u64, @intCast(self.getThreadEffectivePriority(thread)));
         if (&self.activeThreads[effectivePriority] == thread.item.list) return;
@@ -501,19 +501,19 @@ pub const Scheduler = extern struct {
 
     fn ensureNoSpinlocks(local: *arch.LocalStorage) void {
         if (local.spinlockCount != 0) {
-            std.debug.panic("Cannot yield: {d} spinlocks are still acquired", .{local.spinlockCount});
+            kernel.panic("Cannot yield: {d} spinlocks are still acquired", .{local.spinlockCount});
         }
     }
 
     fn ensureInterruptsDisabled(self: *@This()) void {
         if (self.dispatchSpinLock.interruptsEnabled.readVolatile()) {
-            std.debug.panic("Cannot proceed: interrupts were enabled when the scheduler lock was acquired. This may lead to inconsistent state or race conditions.", .{});
+            kernel.panic("Cannot proceed: interrupts were enabled when the scheduler lock was acquired. This may lead to inconsistent state or race conditions.");
         }
     }
 
     fn ensureThreadIsExecuting(local: *arch.LocalStorage) void {
         if (!local.currentThread.?.executing.readVolatile()) {
-            std.debug.panic("Cannot yield: current thread is not executing", .{});
+            kernel.panic("Cannot yield: current thread is not executing");
         }
     }
 
@@ -588,15 +588,15 @@ pub const Scheduler = extern struct {
         } else if (local.currentThread.?.type == .idle or local.currentThread.?.type == .asyncTask) {
             local.currentThread.?.state.writeVolatile(.active);
         } else {
-            std.debug.panic("unrecognized thread type", .{});
+            kernel.panic("unrecognized thread type");
         }
     }
 
     fn switchContext(self: *@This(), local: *arch.LocalStorage) void {
-        const newThread = self.pickThread(local) orelse std.debug.panic("Could not find a thread to execute", .{});
+        const newThread = self.pickThread(local) orelse kernel.panic("Could not find a thread to execute");
         local.currentThread = newThread;
 
-        if (newThread.executing.readVolatile()) std.debug.panic("thread in active queue already executing", .{});
+        if (newThread.executing.readVolatile()) kernel.panic("thread in active queue already executing");
 
         newThread.executing.writeVolatile(true);
         newThread.execProcId = local.processorID;
@@ -617,7 +617,7 @@ pub const Scheduler = extern struct {
             local.currentThread.?.process.addrSpace;
 
         arch.switchContext(newCtx, &addrSpace.arch, newThread.kernelStack, newThread, oldAddrSpace);
-        std.debug.panic("context switch unexpectedly returned", .{});
+        kernel.panic("context switch unexpectedly returned");
     }
 
     //TODO?: should I keep this implementation
@@ -652,18 +652,18 @@ pub const Scheduler = extern struct {
     //         }
     //         self.activeTimersSpinLock.release();
 
-    //         if (local.spinlockCount != 0) std.debug.panic("Cannot yield: {d} spinlocks are still acquired", .{local.spinlockCount});
+    //         if (local.spinlockCount != 0) kernel.panic("Cannot yield: {d} spinlocks are still acquired", .{local.spinlockCount});
 
     //         arch.disableInterrupts();
 
     //         self.dispatchSpinLock.acquire();
 
     //         if (self.dispatchSpinLock.interruptsEnabled.readVolatile()) {
-    //             std.debug.panic("Cannot proceed: interrupts were enabled when the scheduler lock was acquired. This may lead to inconsistent state or race conditions.", .{});
+    //             kernel.panic("Cannot proceed: interrupts were enabled when the scheduler lock was acquired. This may lead to inconsistent state or race conditions.");
     //         }
 
     //         if (!local.currentThread.?.executing.readVolatile()) {
-    //             std.debug.panic("Cannot yield: current thread is not executing", .{});
+    //             kernel.panic("Cannot yield: current thread is not executing");
     //         }
 
     //         const oldAddrSpace = if (local.currentThread.?.tempAddrSpace) |tas| @as(*memory.AddressSpace, @ptrCast(tas)) else local.currentThread.?.process.addrSpace;
@@ -726,13 +726,13 @@ pub const Scheduler = extern struct {
     //             } else if (local.currentThread.?.type == .idle or local.currentThread.?.type == .asyncTask) {
     //                 local.currentThread.?.state.writeVolatile(.active);
     //             } else {
-    //                 std.debug.panic("unrecognized thread type", .{});
+    //                 kernel.panic("unrecognized thread type");
     //             }
     //         }
 
-    //         const newThread = self.pickThread(local) orelse std.debug.panic("Could not find a thread to execute", .{});
+    //         const newThread = self.pickThread(local) orelse kernel.panic("Could not find a thread to execute");
     //         local.currentThread = newThread;
-    //         if (newThread.executing.readVolatile()) std.debug.panic("thread in active queue already executing", .{});
+    //         if (newThread.executing.readVolatile()) kernel.panic("thread in active queue already executing");
 
     //         newThread.executing.writeVolatile(true);
     //         newThread.execProcId = local.processorID;
@@ -744,7 +744,7 @@ pub const Scheduler = extern struct {
     //         const addrSpace = if (newThread.tempAddrSpace) |tas| @as(*memory.AddressSpace, @ptrCast(tas)) else newThread.process.addrSpace;
     //         addrSpace.openRef();
     //         arch.switchContext(newCtx, &addrSpace.arch, newThread.kernelStack, newThread, oldAddrSpace);
-    //         std.debug.panic("do context switch unexpectedly returned", .{});
+    //         kernel.panic("do context switch unexpectedly returned");
     //     }
     // }
     pub fn unblockThread(self: *@This(), unblockedThread: *Thread, prevMutexOwner: ?*Thread) void {
@@ -754,16 +754,16 @@ pub const Scheduler = extern struct {
         switch (unblockedThread.state.readVolatile()) {
             .waitingMutex => {
                 if (unblockedThread.blocking.mutex == null) {
-                    std.debug.panic("unblockedThread.blocking.mutex is null");
+                    kernel.panic("unblockedThread.blocking.mutex is null");
                 }
                 unblockedThread.blocking.mutex.?.unlock();
             },
             .waitingEvent => {
                 if (unblockedThread.blocking.event.items == null) {
-                    std.debug.panic("unblockedThread.blocking.event.items is null");
+                    kernel.panic("unblockedThread.blocking.event.items is null");
                 }
                 if (unblockedThread.blocking.event.count == 0) {
-                    std.debug.panic("unblockedThread.blocking.event.count is 0");
+                    kernel.panic("unblockedThread.blocking.event.count is 0");
                 }
                 unblockedThread.blocking.event.count -= 1;
                 if (unblockedThread.blocking.event.count == 0) {
@@ -772,11 +772,11 @@ pub const Scheduler = extern struct {
             },
             .waitingWriterLock => {
                 if (unblockedThread.blocking.writer.type) {
-                    std.debug.panic("unblockedThread.blocking.writer.type is true");
+                    kernel.panic("unblockedThread.blocking.writer.type is true");
                 }
                 unblockedThread.state.writeVolatile(Thread.state.active);
             },
-            else => std.debug.panic("Unexpected or invalid thread state", .{}),
+            else => kernel.panic("Unexpected or invalid thread state"),
         }
         unblockedThread.state.writeVolatile(.active);
         if (!unblockedThread.executing.readVolatile()) {
@@ -807,33 +807,33 @@ pub const Scheduler = extern struct {
 
     fn ensureThreadIsActive(_: *@This(), thread: Thread) void {
         if (thread.state.readVolatile() != .active) {
-            std.debug.panic("Thread is not active", .{});
+            kernel.panic("Thread is not active");
         }
     }
 
     fn ensureThreadIsNotExecuting(_: *@This(), thread: Thread) void {
         if (thread.executing.readVolatile()) {
-            std.debug.panic("Thread is executing", .{});
+            kernel.panic("Thread is executing");
         }
     }
 
     fn ensureThreadIsNormal(_: *@This(), thread: Thread) void {
         if (thread.type != .normal) {
-            std.debug.panic("Thread is not normal", .{});
+            kernel.panic("Thread is not normal");
         }
     }
 
     fn ensureThreadPriorityIsValid(_: *@This(), thread: Thread) void {
         if (thread.priority < 0) {
-            std.debug.panic("Thread priority is less than 0", .{});
+            kernel.panic("Thread priority is less than 0");
         } else if (thread.priority >= Thread.priorityCount) {
-            std.debug.panic("Thread priority is greater than or equal to priorityCount", .{});
+            kernel.panic("Thread priority is greater than or equal to priorityCount");
         }
     }
 
     fn ensureThreadIsNotInList(_: *@This(), thread: Thread) void {
         if (thread.item.list != null) {
-            std.debug.panic("Thread is already in a list", .{});
+            kernel.panic("Thread is already in a list");
         }
     }
 
@@ -861,7 +861,7 @@ export fn ThreadPause(thread: *Thread, resumeAfter: bool) callconv(.C) void {
 
                     arch.fakeTimerInterrupt();
 
-                    if (thread.paused.readVolatile()) std.debug.panic("current thread incorrectly resumed", .{});
+                    if (thread.paused.readVolatile()) kernel.panic("current thread incorrectly resumed");
                 } else {
                     arch.IPI.sendYield(thread);
                 }
@@ -980,14 +980,14 @@ pub const Timer = extern struct {
 
     pub fn remove(self: *@This()) void {
         kernel.scheduler.activeTimersSpinLock.acquire();
-        if (self.callback != null) std.debug.panic("timer with callback cannot be removed", .{});
+        if (self.callback != null) kernel.panic("timer with callback cannot be removed");
         if (self.node.list != null) kernel.scheduler.activeTimers.remove(&self.node);
         kernel.scheduler.activeTimersSpinLock.release();
     }
 };
 
 export fn ProcessKill(process: *Process) callconv(.C) void {
-    if (process.handleCount.readVolatile() == 0) std.debug.panic("process is on the all process list but there are no handles in it", .{});
+    if (process.handleCount.readVolatile() == 0) kernel.panic("process is on the all process list but there are no handles in it");
 
     _ = kernel.scheduler.activeProcessCount.atomicFetchAdd(1);
 

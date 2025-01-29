@@ -33,7 +33,40 @@ pub var modulePtr: u64 = modulesStart;
 var getTimeFromPitMsStarted = false;
 var getTimeFromPitMsLast: u64 = 0;
 var getTimeFromPitMSCumulative: u64 = 0;
+pub export var physicalMemoryRegions: [*]memory.Physical.MemoryRegion = undefined;
+pub export var physicalMemoryRegionsCount: u64 = undefined;
+pub export var physicalMemoryRegionsIndex: u64 = undefined;
+pub export var physicalMemoryHighest: u64 = undefined;
+pub export var physicalMemoryRegionsPagesCount: u64 = undefined;
+export var pagingNXESupport: u32 linksection(".data") = 1;
+export var pagingSMEPSupport: u32 linksection(".data") = 1;
+export var pagingPCIDSupport: u32 linksection(".data") = 1;
+export var pagingTCESupport: u32 linksection(".data") = 1;
+export var simdSSE3Support: u32 linksection(".data") = 1;
+export var simdSSSE3Support: u32 linksection(".data") = 1;
+pub export var installationID: u128 linksection(".data") = 0;
+export var kernelSize: u32 linksection(".data") = 0;
+pub export var bootloaderID: u64 linksection(".data") = 0;
+pub export var bootloaderInformationOffset: u64 linksection(".data") = 0;
+export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
+export var processorGDTR: u128 align(0x10) linksection(".data") = undefined;
 
+pub export var timeStampTicksPerMs: u64 = undefined;
+
+export var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entryPerPageTableBitCount + pageBitCount + 3)]u8 = undefined;
+const IO_UNUSED_DELAY = (0x0080);
+const IO_COM_1 = (0x03F8); // To 0x03FF.;
+const IO_PIC_1_COMMAND = (0x0020);
+const IO_PIC_1_DATA = (0x0021);
+const IO_PIC_2_COMMAND = (0x00A0);
+const IO_PIC_2_DATA = (0x00A1);
+pub const userSpaceStart = 0x100000000000;
+pub const userSpaceSize = 0xF00000000000 - 0x100000000000;
+const IO_PIT_COMMAND = 0x0043;
+const IO_PIT_DATA = 0x0040;
+const IO_PCI_CONFIG_ADDRESS = 0x0CF8;
+const IO_PCI_DATA = 0x0CFC;
+var pciConfigSpinlock: kernel.sync.SpinLock = undefined;
 export var globalDescriptorTable: GDT align(0x10) linksection(".data") = GDT{
     .nullntry = GDT.Entry.new(0, 0, 0, 0),
     .codeEntry = GDT.Entry.new(0xffff, 0, 0xcf9a, 0),
@@ -89,7 +122,7 @@ pub fn initThread(
     ctx._check = 0x1234567890ABCDEF;
     ctx.rflags = 1 << 9;
     ctx.rip = startAddr;
-    if (ctx.rip == 0) std.debug.panic("RIP is null", .{});
+    if (ctx.rip == 0) kernel.panic("RIP is null");
     ctx.rsp = userStack + userStackSize - 8;
     ctx.rdi = arg1;
     ctx.rsi = arg2;
@@ -128,7 +161,7 @@ pub const InterruptContext = extern struct {
 
     fn checkSanity(self: *@This()) void {
         if (self.cs > 0x100 or self.ds > 0x100 or self.ss > 0x100 or (self.rip >= 0x1000000000000 and self.rip < 0xFFFF000000000000) or (self.rip < 0xFFFF800000000000 and self.cs == 0x48)) {
-            std.debug.panic("Failed to check context sanity", .{});
+            kernel.panic("Failed to check context sanity");
         }
     }
 };
@@ -217,19 +250,19 @@ const Commit = extern struct {
 
 export fn InterruptHandler(ctx: *InterruptContext) callconv(.C) void {
     if (kernel.scheduler.panic.readVolatile() and ctx.intNum != 2) return;
-    if (areInterruptsEnabled()) std.debug.panic("interrupts were enabled at the start of the interrupt handler", .{});
+    if (areInterruptsEnabled()) kernel.panic("interrupts were enabled at the start of the interrupt handler");
 
     const interrupt = ctx.intNum;
     const maybeLS = getLocalStorage();
     if (maybeLS) |ls| {
         if (ls.currentThread) |currentThread| currentThread.lastInterruptTicks = ProcessorReadTimeStamp();
-        if (ls.spinlockCount != 0 and ctx.cr8 != 0xe) std.debug.panic("spinlock count is not zero", .{});
+        if (ls.spinlockCount != 0 and ctx.cr8 != 0xe) kernel.panic("spinlock count is not zero");
     }
 
     if (interrupt < 0x20) {
         handleException(ctx, maybeLS);
     } else if ((interrupt == 0xFF) or (interrupt >= 0x20 and interrupt < 0x30) or (interrupt >= 0xF0 and interrupt < 0xFE)) {
-        std.debug.panic("Not implemented", .{});
+        kernel.panic("Not implemented");
     }
 }
 export fn installInterruptHandlers() callconv(.C) void {
@@ -329,13 +362,13 @@ fn handleException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
 }
 
 fn handleUserException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
-    if (ctx.cs != 0x5b and ctx.cs != 0x6b) std.debug.panic("Invalid CS", .{});
+    if (ctx.cs != 0x5b and ctx.cs != 0x6b) kernel.panic("Invalid CS");
     const currentThread = getCurrentThread().?;
-    if (currentThread.isKernelThread) std.debug.panic("Kernel thread is executing user code", .{});
+    if (currentThread.isKernelThread) kernel.panic("Kernel thread is executing user code");
     const prevTerminatableState = currentThread.terminatableState.readVolatile();
     currentThread.terminatableState.writeVolatile(.inSysCall);
 
-    if (maybeLS) |ls| if (ls.spinlockCount != 0) std.debug.panic("user exception occurred with spinlock acquired", .{});
+    if (maybeLS) |ls| if (ls.spinlockCount != 0) kernel.panic("user exception occurred with spinlock acquired");
 
     enableInterrupts();
     maybeLS = null;
@@ -343,7 +376,7 @@ fn handleUserException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
         handleCrash(ctx, currentThread);
     }
 
-    if (currentThread.terminatableState.readVolatile() != .inSysCall) std.debug.panic("Thread changed terminatable state during interrupt", .{});
+    if (currentThread.terminatableState.readVolatile() != .inSysCall) kernel.panic("Thread changed terminatable state during interrupt");
 
     currentThread.terminatableState.writeVolatile(prevTerminatableState);
     if (currentThread.terminating.readVolatile() or currentThread.paused.readVolatile()) fakeTimerInterrupt();
@@ -351,11 +384,11 @@ fn handleUserException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
 }
 
 fn handleKernelException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
-    if (ctx.cs != 0x48) std.debug.panic("Invalid CS", .{});
+    if (ctx.cs != 0x48) kernel.panic("Invalid CS");
     if (ctx.intNum == 14) {
-        if (ctx.errorCode & (1 << 3) != 0) std.debug.panic("unresolvable page fault", .{});
+        if (ctx.errorCode & (1 << 3) != 0) kernel.panic("unresolvable page fault");
 
-        if (maybeLS) |local| if (local.spinlockCount != 0 and (ctx.cr2 >= 0xFFFF900000000000 and ctx.cr2 < 0xFFFFF00000000000)) std.debug.panic("page fault occurred with spinlocks active", .{});
+        if (maybeLS) |local| if (local.spinlockCount != 0 and (ctx.cr2 >= 0xFFFF900000000000 and ctx.cr2 < 0xFFFFF00000000000)) kernel.panic("page fault occurred with spinlocks active");
 
         if (ctx.fxsave & 0x200 != 0 and ctx.cr8 != 0xe) {
             enableInterrupts();
@@ -371,9 +404,9 @@ fn handleKernelException(ctx: *InterruptContext, maybeLS: ?*LocalStorage) void {
             }
         }
 
-        if (res or safeCopy) disableInterrupts() else std.debug.panic("Unhandleable page fault", .{});
+        if (res or safeCopy) disableInterrupts() else kernel.panic("Unhandleable page fault");
     } else {
-        std.debug.panic("Unable to resolve exception", .{});
+        kernel.panic("Unable to resolve exception");
     }
 }
 
@@ -394,12 +427,6 @@ fn handleCrash(ctx: *InterruptContext, currentThread: *Thread) void {
     currentThread.process.?.crash(&crashReason);
 }
 
-export var pagingNXESupport: u32 linksection(".data") = 1;
-export var pagingSMEPSupport: u32 linksection(".data") = 1;
-export var pagingPCIDSupport: u32 linksection(".data") = 1;
-export var pagingTCESupport: u32 linksection(".data") = 1;
-export var simdSSE3Support: u32 linksection(".data") = 1;
-export var simdSSSE3Support: u32 linksection(".data") = 1;
 comptime {
     asm (
         \\  .intel_syntax noprefix
@@ -1041,7 +1068,7 @@ pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlag
     const forSupervisor = flags.contains(.forSupervisor);
 
     if (!areInterruptsEnabled()) {
-        std.debug.panic("Page fault with interrupts disabled\n", .{});
+        kernel.panic("Page fault with interrupts disabled\n");
     }
 
     const faultInVeryLowMem = va < pageSize;
@@ -1068,7 +1095,7 @@ pub export fn handlePageFault(faultyAddr: u64, flags: memory.HandlePageFaultFlag
                 const space = if (currentThread.TempAddrSpace) |tempAddrSpace| @as(*memory.AddressSpace, @ptrCast(tempAddrSpace)) else currentThread.process.?.addrSpace;
                 return space.handlePageFault(va, flags);
             } else {
-                std.debug.panic("unreachable path\n,", .{});
+                kernel.panic("unreachable path\n,");
             }
         }
     }
@@ -1085,22 +1112,22 @@ export fn MMArchIsBufferInUserRange(baseAddr: u64, byteCount: u64) callconv(.C) 
 
 pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u64, flags: memory.MapPageFlags) callconv(.C) bool {
     if ((va | askedPhysicalAddr) & (pageSize - 1) != 0) {
-        std.debug.panic("Pages are not aligned", .{});
+        kernel.panic("Pages are not aligned");
     }
 
     if (kernel.physicalMemoryManager.pageFrameDBCount != 0 and (askedPhysicalAddr >> pageBitCount < kernel.physicalMemoryManager.pageFrameDBCount)) {
         const frameState = kernel.physicalMemoryManager.pageFrames[askedPhysicalAddr >> pageBitCount].state.readVolatile();
 
         if (frameState != .active and frameState != .unusable) {
-            std.debug.panic("Page frame is not active nor unusable", .{});
+            kernel.panic("Page frame is not active nor unusable");
         }
     }
 
-    if (askedPhysicalAddr == 0) std.debug.panic("Physical address is null", .{});
-    if (va == 0) std.debug.panic("Virtual address is null", .{});
+    if (askedPhysicalAddr == 0) kernel.panic("Physical address is null");
+    if (va == 0) kernel.panic("Virtual address is null");
 
     if (askedPhysicalAddr < 0xFFFF800000000000 and ProcessorReadCR3() != space.arch.cr3) {
-        std.debug.panic("Mapping physical address in wrong address space", .{});
+        kernel.panic("Mapping physical address in wrong address space");
     }
 
     const aquireFrameLock = !flags.contains(.noNewTables) and !flags.contains(.frameLockAquired);
@@ -1122,13 +1149,13 @@ pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u
 
     if (space != &kernel.coreAddressSpace and space != &kernel.addrSpace) {
         const L4Index = indices[@intFromEnum(PageTables.Level.level4)];
-        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L4Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L3 page table\n");
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L4Index & 0b111))) == 0) kernel.panic("attempt to map using uncommited L3 page table\n");
 
         const L3Index = indices[@intFromEnum(PageTables.Level.level3)];
-        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L3Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L2 page table\n");
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L3Index & 0b111))) == 0) kernel.panic("attempt to map using uncommited L2 page table\n");
 
         const L2Index = indices[@intFromEnum(PageTables.Level.level2)];
-        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L2Index & 0b111))) == 0) std.debug.panic("attempt to map using uncommited L1 page table\n");
+        if (space.arch.commit.L3[L4Index >> 3] & (@as(u8, 1) << @as(u3, @truncate(L2Index & 0b111))) == 0) kernel.panic("attempt to map using uncommited L1 page table\n");
     }
 
     handleMissingPageTable(space, .level4, indices, flags);
@@ -1153,15 +1180,15 @@ pub export fn mapPage(space: *memory.AddressSpace, askedPhysicalAddr: u64, va: u
         }
 
         if (oldValue & ~@as(u64, pageSize - 1) != physicalAddress) {
-            std.debug.panic("attempt to map page tha has already been mapped", .{});
+            kernel.panic("attempt to map page tha has already been mapped");
         }
 
         if (oldValue == value) {
-            std.debug.panic("attempt to rewrite page translation", .{});
+            kernel.panic("attempt to rewrite page translation");
         } else {
             const writable = oldValue & 2 == 0 and value & 2 != 0;
             if (!writable) {
-                std.debug.panic("attempt to change flags mapping address", .{});
+                kernel.panic("attempt to change flags mapping address");
             }
         }
     }
@@ -1225,7 +1252,7 @@ pub export fn unMapPages(
         if (copy and flags.contains(.balanceFile) and !flags.contains(.freeCopied)) continue;
 
         if ((~translation & (1 << 5) != 0) or (~translation & (1 << 6) != 0)) {
-            std.debug.panic("page found without accessed or dirty bit set", .{});
+            kernel.panic("page found without accessed or dirty bit set");
         }
 
         PageTables.access(.level1, indices).* = 0;
@@ -1249,7 +1276,7 @@ inline fn handleMissingPageTable(
     flags: memory.MapPageFlags,
 ) void {
     if (PageTables.access(level, indices).* & 1 == 0) {
-        if (flags.contains(.noNewTables)) std.debug.panic("no new tables flag set but a table was missing", .{});
+        if (flags.contains(.noNewTables)) kernel.panic("no new tables flag set but a table was missing");
 
         const physicalAllocationFlags = memory.Physical.Flags.fromFlag(.lockAquired);
         const physicalAllocation = memory.physical_allocate_with_flags(physicalAllocationFlags) | 0b111;
@@ -1322,7 +1349,7 @@ pub fn freeAddressSpace(space: *memory.AddressSpace) callconv(.C) void {
     }
 
     if (space.arch.activePageTableCount != 0) {
-        std.debug.panic("space has still active page tables", .{});
+        kernel.panic("space has still active page tables");
     }
 
     _ = kernel.coreAddressSpace.reserveMutex.acquire();
@@ -1345,8 +1372,6 @@ pub export fn getTimeMS() callconv(.C) u64 {
     return ArchGetTimeFromPITMs();
 }
 
-const IO_PIT_COMMAND = 0x0043;
-const IO_PIT_DATA = 0x0040;
 fn initializePIT() void {
     out8(IO_PIT_COMMAND, 0x30);
     out8(IO_PIT_DATA, 0xff);
@@ -1476,7 +1501,7 @@ const LAPIC = struct {
 
 fn ArchCallFunctionOnAllProcessors(cb: CallFunctionOnAllProcessorsCallback, includeThisProc: bool) void {
     ipiLock.assertLocked();
-    if (cb == 0) std.debug.panic("Callback is null", .{});
+    if (cb == 0) kernel.panic("Callback is null");
 
     const cpuCount = ACPI.driver.procCount;
     if (cpuCount > 1) {
@@ -1584,10 +1609,6 @@ pub export fn translateAddr(va: u64, hasWriteAccess: bool) callconv(.C) u64 {
     if (pa & 1 == 0) return 0;
     return pa & 0x0000FFFFFFFFF000;
 }
-
-const IO_PCI_CONFIG_ADDRESS = 0x0CF8;
-const IO_PCI_DATA = 0x0CFC;
-var pciConfigSpinlock: kernel.sync.SpinLock = undefined;
 
 pub fn readPciConfig(bus: u8, device: u7, func: u8, offset: u8, size: 32) u32 {
     pciConfigSpinlock.acquire();
@@ -1708,12 +1729,6 @@ const TSS = packed struct {
     v5: u64,
 };
 
-pub export var installationID: u128 linksection(".data") = 0;
-export var kernelSize: u32 linksection(".data") = 0;
-pub export var bootloaderID: u64 linksection(".data") = 0;
-pub export var bootloaderInformationOffset: u64 linksection(".data") = 0;
-export var _stack: [0x4000]u8 align(0x1000) linksection(".bss") = undefined;
-export var processorGDTR: u128 align(0x10) linksection(".data") = undefined;
 export fn _start() callconv(.Naked) noreturn {
     @setRuntimeSafety(false);
     asm volatile (
@@ -1809,8 +1824,6 @@ const NewProcessorStorage = extern struct {
     }
 };
 
-pub export var timeStampTicksPerMs: u64 = undefined;
-
 pub fn init() callconv(.C) void {
     ACPI.driver.parseTables();
 
@@ -1873,8 +1886,6 @@ export fn SetupProcessor2(storage: *NewProcessorStorage) callconv(.C) void {
     ProcessorInstallTSS(gdt, tss);
 }
 
-export var core_L1_commit: [(0xFFFF800200000000 - 0xFFFF800100000000) >> (entryPerPageTableBitCount + pageBitCount + 3)]u8 = undefined;
-
 pub fn initMemory() callconv(.C) void {
     const cr3 = ProcessorReadCR3();
     kernel.addrSpace.arch.cr3 = cr3;
@@ -1896,12 +1907,6 @@ pub fn initMemory() callconv(.C) void {
     kernel.addrSpace.arch.commit.L1 = @as([*]u8, @ptrFromInt(kernel.coreAddressSpace.reserve(AddressSpace.L1_commit_size, memory.Region.Flags.fromFlags(.{ .normal, .noCommitTracking, .fixed }), 0).?.descriptor.baseAddr));
     kernel.coreAddressSpace.reserveMutex.release();
 }
-
-pub export var physicalMemoryRegions: [*]memory.Physical.MemoryRegion = undefined;
-pub export var physicalMemoryRegionsCount: u64 = undefined;
-pub export var physicalMemoryRegionsIndex: u64 = undefined;
-pub export var physicalMemoryHighest: u64 = undefined;
-pub export var physicalMemoryRegionsPagesCount: u64 = undefined;
 
 pub export fn EarlyAllocatePage() callconv(.C) u64 {
     const index = blk: {
@@ -1940,9 +1945,6 @@ export fn PCProcessMemoryMap() callconv(.C) void {
     physicalMemoryRegionsPagesCount = physicalMemoryRegions[physicalMemoryRegionsCount].pageCount;
 }
 
-const IO_UNUSED_DELAY = (0x0080);
-const IO_COM_1 = (0x03F8); // To 0x03FF.;
-
 export fn PCSetupCOM1() callconv(.C) void {
     ProcessorOut8Delayed(IO_COM_1 + 1, 0x00);
     ProcessorOut8Delayed(IO_COM_1 + 3, 0x80);
@@ -1966,10 +1968,6 @@ export fn ProcessorOut8Delayed(port: u16, value: u8) callconv(.C) void {
     _ = in8(IO_UNUSED_DELAY);
 }
 
-const IO_PIC_1_COMMAND = (0x0020);
-const IO_PIC_1_DATA = (0x0021);
-const IO_PIC_2_COMMAND = (0x00A0);
-const IO_PIC_2_DATA = (0x00A1);
 pub export fn PCDisablePIC() callconv(.C) void {
     ProcessorOut8Delayed(IO_PIC_1_COMMAND, 0x11);
     ProcessorOut8Delayed(IO_PIC_2_COMMAND, 0x11);
@@ -2104,8 +2102,6 @@ comptime {
     );
 }
 
-pub const userSpaceStart = 0x100000000000;
-pub const userSpaceSize = 0xF00000000000 - 0x100000000000;
 pub export fn initUserSpace(space: *memory.AddressSpace, region: *memory.Region) callconv(.C) bool {
     region.descriptor.baseAddr = userSpaceStart;
     region.descriptor.pageCount = userSpaceSize / pageSize;

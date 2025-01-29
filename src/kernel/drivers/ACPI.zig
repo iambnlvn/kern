@@ -88,7 +88,9 @@ pub const Driver = extern struct {
 
         pub fn check(self: *align(1) @This()) void {
             if (EsMemorySumBytes(@as([*]u8, @ptrCast(self)), self.length) != 0) {
-                std.debug.panic("ACPI table checksum failed!", .{});
+                std.debug.panic(
+                    "ACPI table checksum failed!",
+                );
             }
         }
     };
@@ -110,17 +112,23 @@ pub const Driver = extern struct {
 
                 break :blk @as(*align(1) DescriptorTable, @ptrFromInt(kernel.addrSpace.mapPhysical(sdtPA, 16384, Region.Flags.empty())));
             } else {
-                std.debug.panic("unable to get RSDP", .{});
+                std.debug.panic(
+                    "unable to get RSDP",
+                );
             }
         };
 
         const isValid = ((sdt.signature == XSDTSignature and isXSDT) or (sdt.signature == RSDTSignature and !isXSDT)) and sdt.length < 16384 and EsMemorySumBytes(@as([*]u8, @ptrCast(sdt)), sdt.length) == 0;
 
-        if (!isValid) std.debug.panic("system descriptor pointer is invalid", .{});
+        if (!isValid) std.debug.panic(
+            "system descriptor pointer is invalid",
+        );
 
         const tableCount = (sdt.length - @sizeOf(DescriptorTable)) >> (@as(u2, 2) + @intFromBool(isXSDT));
 
-        if (tableCount == 0) std.debug.panic("no tables found", .{});
+        if (tableCount == 0) std.debug.panic(
+            "no tables found",
+        );
 
         const tableListAddr = @intFromPtr(sdt) + DescriptorTable.headerLen;
 
@@ -198,10 +206,14 @@ pub const Driver = extern struct {
                         }
 
                         if (self.procCount > 256 or self.IOAPICCount > 16 or self.interruptOverrideCount > 256 or self.LAPICNMICount > 32) {
-                            std.debug.panic("wrong numbers", .{});
+                            std.debug.panic(
+                                "wrong numbers",
+                            );
                         }
                     } else {
-                        std.debug.panic("ACPI initialization - couldn't find the MADT table", .{});
+                        std.debug.panic(
+                            "ACPI initialization - couldn't find the MADT table",
+                        );
                     }
                 },
                 FADTSignature => {
@@ -230,7 +242,9 @@ pub const Driver = extern struct {
 
                             self.HPETPeriod = self.HPETBaseAddr.?[0] >> 32;
                         } else {
-                            std.debug.panic("failed to map HPET base address", .{});
+                            std.debug.panic(
+                                "failed to map HPET base address",
+                            );
                         }
                     }
 
@@ -242,7 +256,9 @@ pub const Driver = extern struct {
             _ = kernel.addrSpace.free(@intFromPtr(header), 0, false);
         }
 
-        if (!madtFound) std.debug.panic("MADT not found", .{});
+        if (!madtFound) std.debug.panic(
+            "MADT not found",
+        );
     }
 
     fn mapPhysicalMem(pa: u64, length: u64) u64 {
